@@ -226,6 +226,7 @@ static void do_scan(const Job &j)
         return strcasecmp(a.name.c_str(), b.name.c_str()) < 0;
     });
     ESP_LOGI(TAG, "scan %s: %u entries%s", j.path, (unsigned)v.size(), d ? "" : " (open failed)");
+    for (size_t i = 0; i < v.size() && i < 40; i++) ESP_LOGI(TAG, "  %s %s (%u)", v[i].dir ? "[D]" : "   ", v[i].name.c_str(), (unsigned)v[i].size);
 
     bsp_display_lock(0);
     s_entries.swap(v);

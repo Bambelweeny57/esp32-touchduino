@@ -26,7 +26,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 | `src/engine/engine.cpp` | Replaces MaxDuino.ino: FreeRTOS task on core 1, command queue, TZX/TAP block pre-scan for block skip, REM handling, status snapshot |
 | `src/engine/tape_engine.h` | C API used by the UI (`tape_play/pause/stop/block_skip/apply_settings/get_status`) |
 | `src/engine/monitor.cpp` | **Speaker output**: ISR records edges into a ring; task on core 0 replays them to the onboard I2S amp (BCK 42, WS 2, DOUT 41) at 44.1 kHz, ~40 ms behind, DC-blocked |
-| `src/app/storage.c` | SD (SPI3: CS10 MOSI11 CLK12 MISO13, `/sdcard`) and NVS settings |
+| `src/app/storage.c` | SD at `/sdcard`: SDMMC 1-bit (CLK12 CMD11 D0 13) first, SPI fallback; NVS settings |
 | `src/ui/ui.cpp` | LVGL UI: header, paged file list, preview pane (cover art / system badge), progress, 6 transport buttons, settings screen |
 | `src/ui/cover.cpp` | JPG (LVGL tjpgd) / PNG (lodepng) decode + scale into PSRAM |
 
@@ -51,7 +51,8 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - [x] Compiles clean (`pio run`), flashed to board 2026-11-14, boots without crash
 - [x] Timer rewritten on TIMG1 T0 via LL (gptimer driver's IRAM linker fragment is NOT applied by PlatformIO; verified with nm/objdump that wave2/tape_isr/setPeriod are in IRAM 0x4037xxxx)
 - [x] Settings has a speaker "Test" button (700 ms 1 kHz beep via `monitor_test_beep`)
-- [ ] SD card: on 2026-11-14 both SPI and SDMMC-1bit mount timed out (0x107), most likely no card inserted. storage.c tries SPI then falls back to SDMMC 1-bit automatically.
+- [x] SD card works in **SDMMC 1-bit** mode (as vendor demos). SPI mode fails on this board, and trying SPI first left the card stuck in SPI mode, so SDMMC is tried first. Vendor card (512 MB SDSC "APPSD") has only demo folders, no tape files.
+- [ ] Copy some .tzx/.tap onto the card and test playback (check serial log for "play ..." / "navigable blocks")
 - [ ] User to confirm display/touch UI looks right
 - [ ] Test with speaker (arriving 2026-11-15): Options > Test, then play a .tzx and listen; then test loading into a real machine via 3.5 mm
 

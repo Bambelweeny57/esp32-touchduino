@@ -29,8 +29,9 @@ static const esp_vfs_fat_mount_config_t s_mount_cfg = {
     .allocation_unit_size = 16 * 1024,
 };
 
-// Fallback: SDMMC 1-bit mode on the same pins (CLK 12, CMD 11, D0 13), which
-// is what the vendor demos use. DAT3/CS must be held high for SD mode.
+// Primary: SDMMC 1-bit mode on CLK 12, CMD 11, D0 13 at 20 MHz, exactly as the
+// vendor demos do. Try it before SPI: once a card sees CMD0 in SPI mode it
+// stays in SPI mode until power is removed. DAT3/CS is held high (SD mode).
 static bool sd_mount_sdmmc(void)
 {
     if (s_bus_ready) {
@@ -40,7 +41,7 @@ static bool sd_mount_sdmmc(void)
     gpio_set_direction(SD_PIN_CS, GPIO_MODE_OUTPUT);
     gpio_set_level(SD_PIN_CS, 1);
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+    host.max_freq_khz = SDMMC_FREQ_DEFAULT;   // 20 MHz
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
     slot.width = 1;
     slot.clk = SD_PIN_CLK;
@@ -58,12 +59,11 @@ static bool sd_mount_sdmmc(void)
     return true;
 }
 
-static bool s_use_sdmmc = false;
 
 bool sd_mount(void)
 {
     if (s_card) return true;
-    if (s_use_sdmmc) return sd_mount_sdmmc();
+    if (sd_mount_sdmmc()) return true;
     if (!s_bus_ready) {
         spi_bus_config_t bus = {
             .mosi_io_num = SD_PIN_MOSI,
@@ -87,9 +87,8 @@ bool sd_mount(void)
     slot.host_id = SD_SPI_HOST;
     esp_err_t err = esp_vfs_fat_sdspi_mount(SD_MOUNT, &host, &slot, &s_mount_cfg, &s_card);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SD mount (SPI) failed: %s - trying SDMMC", esp_err_to_name(err));
+        ESP_LOGW(TAG, "SD mount (SPI) failed: %s", esp_err_to_name(err));
         s_card = NULL;
-        if (sd_mount_sdmmc()) { s_use_sdmmc = true; return true; }
         return false;
     }
     sdmmc_card_print_info(stdout, s_card);
