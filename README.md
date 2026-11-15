@@ -55,9 +55,24 @@ GPIO 17 and 18 are on the 4-pin expansion connectors (GND, 3.3V, IO17, IO18).
 
 ### Wiring the tape output
 
+<img src="images/line-out.png" alt="Line-out filter: IO17 through R1 1 kΩ, C1 10 nF to ground, C2 10 µF coupling capacitor and R2 4.7 kΩ to ground, to the tip of a 3.5 mm plug; REM switch between IO18 and ground" width="640">
+
+| Part | Value | Job |
+| --- | --- | --- |
+| R1 | 1 kΩ | Limits current from the pin; with C1 it rounds off the sharp edges |
+| C1 | 10 nF | Low-pass filter with R1 (about 16 kHz), so even the fastest turbo loaders pass |
+| C2 | 10 µF electrolytic, **+ toward the board** | Blocks the 1.65 V DC offset of the 0–3.3 V signal |
+| R2 | 4.7 kΩ | Holds the output at 0 V when idle |
+
+- **Plug:** jack **tip** carries the signal and **sleeve** goes to GND. With a stereo cable, joining tip and ring is fine.
+- **No amplifier needed:** GPIO 17 swings 0–3.3 V, which is already at or above the level of a cassette player's headphone output. MaxDuino and TZXDuino builds feed the EAR input directly in the same way. If a machine struggles, try a *lower* level first, for example with a 10 kΩ volume pot in place of R2 (wiper to the tip).
 - **Don't connect a speaker straight to GPIO 17.** Use the board's speaker connector to listen.
-- **Line out:** feed the computer's EAR/tape input from GPIO 17 through a simple RC filter. A good starting point is a 1 kΩ resistor in series with a 10 nF capacitor to GND, then optionally a 10 µF coupling capacitor to the jack tip. Jack sleeve goes to GND.
-- **Motor sense:** wire the computer's REM output so it pulls GPIO 18 to GND when the motor should run. The pin has a pull-up.
+- **Different machines need different leads:**
+  - **ZX Spectrum:** the EAR socket.
+  - **Amstrad CPC 664/6128:** the DIN tape socket. The CPC 464's built-in deck needs a cassette adaptor or a modification.
+  - **BBC Micro:** the 7-pin DIN cassette socket.
+  - **Commodore 64:** has no audio input, so it needs a datasette-port interface instead of this circuit.
+- **Motor sense (optional):** the computer's REM output is a switch (a relay contact) that closes while the motor should run. Wire it between GPIO 18 and GND. The pin has a pull-up, so closed means play. Select **Auto REM** in Options.
 - **Auto REM without a cable:** with nothing on GPIO 18, Auto REM keeps playback paused. That's why the default is Force run.
 
 ## Building and flashing
