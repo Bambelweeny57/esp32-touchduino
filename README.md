@@ -40,6 +40,8 @@ It runs on the Guition **JC3248W535** board:
 
 GPIO 17 and 18 are on the 4-pin expansion connectors (GND, 3.3V, IO17, IO18).
 
+<img src="images/connectors.png" alt="ESP32-Touchduino JC3248W535 Pinout " width="400">
+
 ### Wiring the tape output
 
 - **Don't connect a speaker straight to GPIO 17.** Use the board's speaker connector to listen.
