@@ -1,17 +1,25 @@
-// TouchDuino touch UI (LVGL 8.4, 480x320 landscape).
+// TouchDuino touch UI (LVGL 8.4, 480x320 landscape), "glass" theme.
 //
 //  +-----------------------------------------------------------+
-//  | [<] /sdcard/Spectrum                     REM:off   [gear] |
+//  | [<] /sdcard/Spectrum              REM   [refresh] [gear]  |
 //  +-------------------------------------+---------------------+
-//  | file list (large touch rows)        |  cover art / badge  |
-//  |                                     |  name, type, size   |
+//  | file list (large touch rows)        | +-----------------+ |
+//  |                                     | |##  TV screen  ##| |  <- loading-stripe border
+//  |                                     | +-----------------+ |
+//  |                                     |  name / type, size  |
 //  +-------------------------------------+---------------------+
-//  | [========progress========]  Blk 3/12  Turbo  45%          |
+//  | [====progress====]  PLAY  Blk 3/12  Turbo  45%            |
 //  | [|<] [<<blk] [ PLAY ] [ STOP ] [blk>>] [>|]               |
 //  +-----------------------------------------------------------+
 //
 // Directory scanning and cover decoding run on a worker task pinned to core 0
 // (same core as LVGL); the tape engine and its ISR stay alone on core 1.
+//
+// Performance notes: the display driver uses full_refresh, so ANY change
+// re-renders the whole frame. The "glass" look is therefore faked with opaque
+// gradients plus thin translucent borders (no large alpha-blended areas, no
+// shadows), and the loading-border animation only invalidates while it is
+// actually animating (~12 fps while loading, ~6 fps for the idle placeholder).
 
 #include <string>
 #include <vector>
@@ -21,6 +29,7 @@
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
+#include <ctype.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -32,12 +41,27 @@
 #include "app/storage.h"
 #include "engine/tape_engine.h"
 #include "engine/monitor.h"
+#include "engine/TimerCounter.h"
 
 static const char *TAG = "ui";
 
 #define PAGE_SIZE   100
-#define COVER_W     176
-#define COVER_H     120
+
+// Preview "TV": bezel > striped border frame > screen (cover art / badge)
+#define TV_FRAME_W  160
+#define TV_FRAME_H  108
+#define TV_BORDER   8
+#define SCREEN_W    (TV_FRAME_W - 2 * TV_BORDER)   // 144
+#define SCREEN_H    (TV_FRAME_H - 2 * TV_BORDER)   // 92
+
+#define ANIM_PERIOD_MS 60          // loading border ~16 fps
+#define UI_PERF_LOG    0           // log render time per frame every ~5 s of activity
+#define UI_ANIM_SELFTEST 0         // 1 = force loading stripes (for measuring render cost)
+
+// BLOCKID values reported in tape_status_t.block_id (see engine/MaxDuino.h)
+#define BLK_C64TAP 0xFB
+#define BLK_ORIC   0xFA
+#define BLK_JTAP   0xF8
 
 // ---------------------------------------------------------------------------
 // State (touched only with the LVGL lock held)
@@ -60,10 +84,14 @@ static lv_img_dsc_t *s_cover_img = NULL;
 // Widgets
 static lv_obj_t *scr_main, *scr_settings;
 static lv_obj_t *lbl_path, *lbl_rem, *list;
-static lv_obj_t *cover_box, *img_cover, *badge, *badge_lbl, *badge_stripes[4];
+static lv_obj_t *tv_frame, *tv_screen, *img_cover, *badge, *badge_lbl, *badge_stripes[4], *placeholder_lbl;
 static lv_obj_t *lbl_name, *lbl_info;
 static lv_obj_t *bar_prog, *lbl_status, *lbl_play;
 static lv_obj_t *bm_baud, *sw_motor, *sw_pol, *sw_skip2a, *sw_spk, *sl_vol, *lbl_vol;
+
+// Styles
+static lv_style_t st_screen, st_glass, st_btn, st_item, st_item_chk, st_item_pr;
+static lv_style_t st_bar_bg, st_bar_ind, st_bezel;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -103,24 +131,43 @@ static bool file_exists(const std::string &p)
 static const char *format_name(const char *e)
 {
     if (!strcasecmp(e, "tzx")) return "ZX Spectrum TZX";
-    if (!strcasecmp(e, "tap")) return "TAP (Spectrum/Oric/C64/Jupiter)";
-    if (!strcasecmp(e, "cdt")) return "Amstrad CPC CDT";
+    if (!strcasecmp(e, "tap")) return "TAP";
+    if (!strcasecmp(e, "cdt")) return "Amstrad CDT";
     if (!strcasecmp(e, "tsx")) return "MSX TSX";
     if (!strcasecmp(e, "uef")) return "Acorn UEF";
-    if (!strcasecmp(e, "cas")) return "MSX / Dragon CAS";
+    if (!strcasecmp(e, "cas")) return "MSX/Dragon CAS";
     if (!strcasecmp(e, "p"))   return "ZX81 P";
     if (!strcasecmp(e, "o"))   return "ZX80 O";
     if (!strcasecmp(e, "ay"))  return "AY music";
     if (!strcasecmp(e, "mzf") || !strcasecmp(e, "mzt") || !strcasecmp(e, "m12")) return "Sharp MZ";
     if (!strcasecmp(e, "mtx")) return "Memotech MTX";
-    if (!strcasecmp(e, "caq")) return "Mattel Aquarius";
+    if (!strcasecmp(e, "caq")) return "Aquarius CAQ";
     return "";
 }
 
 // ---------------------------------------------------------------------------
-// System badges (drawn with LVGL primitives, no bitmaps)
+// Systems: badges, border colours and loading-stripe styles
 
-enum System { SYS_NONE, SYS_SPECTRUM, SYS_AMSTRAD, SYS_BBC, SYS_MSX, SYS_DRAGON, SYS_TAPE };
+enum System { SYS_NONE, SYS_SPECTRUM, SYS_AMSTRAD, SYS_BBC, SYS_MSX, SYS_DRAGON, SYS_C64, SYS_TAPE };
+
+// How a system's loaders coloured the border while loading
+enum FrameKind { FK_STATIC, FK_SPECTRUM, FK_CPC, FK_C64 };
+
+static const struct {
+    const char *text;
+    uint32_t bg, fg, s[4];
+    uint32_t border;      // idle border colour
+    FrameKind kind;
+} SYS[] = {
+    /* NONE */     { "",                  0x000000, 0xffffff, { 0, 0, 0, 0 },                                   0x262c38, FK_STATIC },
+    /* SPECTRUM */ { "ZX\nSPECTRUM",      0x000000, 0xffffff, { 0xd81e1e, 0xf2c500, 0x2fb84a, 0x1ea7e1 },       0x000000, FK_SPECTRUM },
+    /* AMSTRAD */  { "AMSTRAD\nCPC",      0x000080, 0xffff00, { 0xe02020, 0x20b040, 0x2050e0, 0x2050e0 },       0x000080, FK_CPC },
+    /* BBC */      { "BBC\nMICRO",        0x000000, 0xf0f0f0, { 0xc00000, 0xc00000, 0xf0f0f0, 0xf0f0f0 },       0x000000, FK_STATIC },
+    /* MSX */      { "MSX",               0x10204a, 0xffffff, { 0x6080ff, 0x6080ff, 0x6080ff, 0x6080ff },       0x5955e0, FK_STATIC },
+    /* DRAGON */   { "DRAGON",            0x0d2a0d, 0x40ff40, { 0xff7a1a, 0xff7a1a, 0xffb000, 0xffb000 },       0x101010, FK_STATIC },
+    /* C64 */      { "COMMODORE\n64",     0x40318d, 0x7869c4, { 0x880000, 0xdd8855, 0xeeee77, 0x0088ff },       0x7869c4, FK_C64 },
+    /* TAPE */     { "",                  0x000000, 0xffffff, { 0, 0, 0, 0 },                                   0x262c38, FK_SPECTRUM },
+};
 
 static System system_from_name(const std::string &name)
 {
@@ -131,43 +178,313 @@ static System system_from_name(const std::string &name)
     if (n.find("bbc") != std::string::npos) return SYS_BBC;
     if (n.find("msx") != std::string::npos) return SYS_MSX;
     if (n.find("dragon") != std::string::npos) return SYS_DRAGON;
+    if (n.find("c64") != std::string::npos || n.find("commodore") != std::string::npos) return SYS_C64;
     return SYS_NONE;
 }
 
 static System system_from_ext(const char *e)
 {
-    if (!strcasecmp(e, "tzx")) return SYS_SPECTRUM;
+    if (!strcasecmp(e, "tzx") || !strcasecmp(e, "tap")) return SYS_SPECTRUM;
     if (!strcasecmp(e, "cdt")) return SYS_AMSTRAD;
     if (!strcasecmp(e, "uef")) return SYS_BBC;
-    if (!strcasecmp(e, "tsx")) return SYS_MSX;
+    if (!strcasecmp(e, "tsx") || !strcasecmp(e, "cas")) return SYS_MSX;
+    return SYS_NONE;
+}
+
+// System that a tape (or folder) belongs to, for its border: a known folder
+// name on the way up wins, then the file extension. No file I/O.
+static System frame_system_for(const std::string &path, bool is_dir)
+{
+    std::string dir = is_dir ? path : parent_of(path);
+    while (dir.size() > strlen(SD_MOUNT)) {
+        size_t slash = dir.rfind('/');
+        System s = system_from_name(dir.substr(slash + 1));
+        if (s != SYS_NONE) return s;
+        dir = parent_of(dir);
+    }
+    if (!is_dir) {
+        System s = system_from_ext(ext_of(path));
+        if (s != SYS_NONE) return s;
+    }
     return SYS_TAPE;
 }
 
-static void show_badge(System sys)
+// ---------------------------------------------------------------------------
+// Loading-stripe border
+
+static FrameKind s_play_kind = FK_STATIC;   // stripe style of the tape being played
+static bool s_placeholder = false;          // preview shows the default "no image" screen
+static uint8_t s_anim_mode = 0;             // 0 static, 1 pilot, 2 data, 3 idle placeholder
+static FrameKind s_anim_kind = FK_SPECTRUM;
+static uint32_t s_anim_frame = 0;
+
+static const uint32_t CPC_PAL[] = { 0x000080, 0x0000ff, 0xff0000, 0xff00ff, 0x00ff00, 0x00ffff,
+                                    0xffff00, 0xffffff, 0xff8000, 0x8000ff, 0x80ff00, 0xff0080 };
+static const uint32_t C64_PAL[] = { 0x000000, 0xffffff, 0x880000, 0xaaffee, 0xcc44cc, 0x00cc55,
+                                    0x0000aa, 0xeeee77, 0xdd8855, 0x664400, 0xff7777, 0x333333,
+                                    0x777777, 0xaaff66, 0x0088ff, 0xbbbbbb };
+
+static inline uint32_t xorshift(uint32_t &s)
 {
-    static const struct { const char *text; uint32_t bg, fg, s[4]; } B[] = {
-        /* NONE */     { "",              0x202020, 0xffffff, { 0, 0, 0, 0 } },
-        /* SPECTRUM */ { "ZX\nSPECTRUM",  0x101010, 0xffffff, { 0xd81e1e, 0xf2c500, 0x2fb84a, 0x1ea7e1 } },
-        /* AMSTRAD */  { "AMSTRAD\nCPC",  0x1a1a2e, 0xffffff, { 0xe02020, 0x20b040, 0x2050e0, 0x2050e0 } },
-        /* BBC */      { "BBC\nMICRO",    0x2a2a2a, 0xf0f0f0, { 0xc00000, 0xc00000, 0xf0f0f0, 0xf0f0f0 } },
-        /* MSX */      { "MSX",           0x10204a, 0xffffff, { 0x6080ff, 0x6080ff, 0x6080ff, 0x6080ff } },
-        /* DRAGON */   { "DRAGON",        0x3a0d0d, 0xffd0a0, { 0xff7a1a, 0xff7a1a, 0xffb000, 0xffb000 } },
-        /* TAPE */     { LV_SYMBOL_AUDIO "\nTAPE", 0x303846, 0xd0d8e8, { 0x8090a8, 0x8090a8, 0x8090a8, 0x8090a8 } },
-    };
-    if (sys == SYS_NONE) { lv_obj_add_flag(badge, LV_OBJ_FLAG_HIDDEN); return; }
-    lv_obj_add_flag(img_cover, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(badge, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_style_bg_color(badge, lv_color_hex(B[sys].bg), 0);
-    lv_obj_set_style_text_color(badge_lbl, lv_color_hex(B[sys].fg), 0);
-    lv_label_set_text(badge_lbl, B[sys].text);
-    for (int i = 0; i < 4; i++) lv_obj_set_style_bg_color(badge_stripes[i], lv_color_hex(B[sys].s[i]), 0);
+    s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+    return s;
 }
 
-static void show_cover_image(lv_img_dsc_t *img)
+// Draw one horizontal band, but only where it falls on the border (never
+// under the screen, which is drawn on top anyway).
+static void draw_band(lv_draw_ctx_t *dc, lv_draw_rect_dsc_t *d, const lv_area_t *a, int y0, int y1, uint32_t col)
+{
+    if (y0 < a->y1) y0 = a->y1;
+    if (y1 > a->y2) y1 = a->y2;
+    if (y0 > y1) return;
+    d->bg_color = lv_color_hex(col);
+    const int top_end = a->y1 + TV_BORDER - 1;
+    const int bot_start = a->y2 - TV_BORDER + 1;
+    lv_area_t r;
+    if (y0 <= top_end) {                                   // top border: full width
+        r = { a->x1, (lv_coord_t)y0, a->x2, (lv_coord_t)LV_MIN(y1, top_end) };
+        lv_draw_rect(dc, d, &r);
+    }
+    if (y1 >= bot_start) {                                 // bottom border: full width
+        r = { a->x1, (lv_coord_t)LV_MAX(y0, bot_start), a->x2, (lv_coord_t)y1 };
+        lv_draw_rect(dc, d, &r);
+    }
+    int m0 = LV_MAX(y0, top_end + 1), m1 = LV_MIN(y1, bot_start - 1);
+    if (m0 <= m1) {                                        // sides only
+        r = { a->x1, (lv_coord_t)m0, (lv_coord_t)(a->x1 + TV_BORDER - 1), (lv_coord_t)m1 };
+        lv_draw_rect(dc, d, &r);
+        r = { (lv_coord_t)(a->x2 - TV_BORDER + 1), (lv_coord_t)m0, a->x2, (lv_coord_t)m1 };
+        lv_draw_rect(dc, d, &r);
+    }
+}
+
+// ---- Live border: the real tape signal, like a real machine's loader ----
+//
+// The tape ISR records every level change (with its time on the tape
+// timeline) into g_mon_ring for the speaker. Each frame we look at a 20 ms
+// window of that history (one PAL TV frame, as on a real Spectrum) ending
+// slightly in the past so it lines up with what the speaker is playing, and
+// map each border row to the signal level at that moment. Read-only, no
+// effect on the ISR.
+
+#define LIVE_WINDOW_US 20000    // one TV frame
+#define LIVE_DELAY_US  35000    // speaker plays ~40 ms behind; minus display latency
+#define SILENCE_US     3000     // no edge for this long = no sound
+#define PILOT_MIN_US   540      // Spectrum pilot half-cycle 619 us; data 244/489 us
+
+struct LiveEdge { uint32_t t; uint8_t lvl; uint32_t idx; };
+
+static uint32_t s_silent_col = 0x000000;    // border colour when there's no sound
+
+static uint32_t live_colour(FrameKind kind, const LiveEdge &e, uint32_t dur)
+{
+    switch (kind) {
+        case FK_CPC: return CPC_PAL[(e.idx * 7u) % (sizeof(CPC_PAL) / 4)];   // a colour per pulse
+        case FK_C64: return C64_PAL[(e.idx * 11u) % 16];
+        default:     // ZX Spectrum ROM loader: red/cyan pilot, blue/yellow data
+            if (dur >= PILOT_MIN_US) return e.lvl ? 0x00c8c8 : 0xc80000;
+            return e.lvl ? 0xc8c800 : 0x0000c8;
+    }
+}
+
+static void draw_live(lv_draw_ctx_t *dc, lv_draw_rect_dsc_t *d, const lv_area_t *a, FrameKind kind)
+{
+    static LiveEdge rev[384];       // newest first
+    static LiveEdge asc[386];       // oldest first
+    const int rows = a->y2 - a->y1 + 1;
+    const uint32_t t1 = (uint32_t)(tape_timer_now_us() - LIVE_DELAY_US);
+    const uint32_t t0 = t1 - LIVE_WINDOW_US;
+
+    // Walk back from the newest edge: skip edges after the window, collect the
+    // window, and keep the last edge before it (its level is in force at t0).
+    uint32_t head = g_mon_head;
+    int nr = 0;
+    bool have_before = false, have_after = false;
+    LiveEdge before = {};
+    uint32_t after_t = 0;
+    for (uint32_t k = 1; k <= 4096 && k <= head; k++) {
+        uint32_t idx = head - k;
+        const mon_edge_t &e = g_mon_ring[idx & (MON_RING_SIZE - 1)];
+        if ((int32_t)(e.t - t1) > 0) { have_after = true; after_t = e.t; continue; }
+        if ((int32_t)(e.t - t0) <= 0 || nr == (int)(sizeof(rev) / sizeof(rev[0]))) {
+            before = { e.t, e.level, idx };
+            have_before = true;
+            break;
+        }
+        rev[nr++] = { e.t, e.level, idx };
+    }
+    int m = 0;
+    if (have_before) asc[m++] = before;
+    for (int i = nr - 1; i >= 0; i--) asc[m++] = rev[i];
+
+    if (m == 0) {   // nothing recorded: silence
+        draw_band(dc, d, a, a->y1, a->y2, s_silent_col);
+        return;
+    }
+
+    int j = 0, run_start = a->y1;
+    uint32_t run_col = 0;
+    for (int r = 0; r < rows; r++) {
+        uint32_t t = t0 + (uint32_t)((uint64_t)LIVE_WINDOW_US * r / rows);
+        while (j + 1 < m && (int32_t)(asc[j + 1].t - t) <= 0) j++;
+        uint32_t col;
+        if ((int32_t)(asc[0].t - t) > 0) {
+            col = s_silent_col;                       // before any known edge
+        } else {
+            uint32_t start = asc[j].t, dur;
+            if (j + 1 < m) dur = asc[j + 1].t - start;
+            else if (have_after) dur = after_t - start;
+            else dur = t - start;                     // still in progress
+            col = dur > SILENCE_US ? s_silent_col : live_colour(kind, asc[j], dur);
+        }
+        if (r == 0) {
+            run_col = col;
+        } else if (col != run_col) {
+            draw_band(dc, d, a, run_start, a->y1 + r - 1, run_col);
+            run_start = a->y1 + r;
+            run_col = col;
+        }
+    }
+    draw_band(dc, d, a, run_start, a->y2, run_col);
+}
+
+static void frame_draw_cb(lv_event_t *e)
+{
+    if (!s_anim_mode) return;   // static border = the object's own bg colour
+    lv_obj_t *obj = lv_event_get_target(e);
+    lv_draw_ctx_t *dc = lv_event_get_draw_ctx(e);
+    lv_area_t a;
+    lv_obj_get_coords(obj, &a);
+    lv_draw_rect_dsc_t d;
+    lv_draw_rect_dsc_init(&d);
+    d.bg_opa = LV_OPA_COVER;
+    d.radius = 0;
+    d.border_width = 0;
+
+    if (s_anim_mode == 4) {     // live tape signal
+        draw_live(dc, &d, &a, s_anim_kind);
+        return;
+    }
+
+    uint32_t rng = 0x9E3779B9u ^ (s_anim_frame * 2654435761u);
+    uint8_t mode = s_anim_mode;
+    FrameKind kind = s_anim_kind;
+    if (mode == 3) {
+        // idle placeholder: a Spectrum-style load, cycling pilot -> data
+        kind = FK_SPECTRUM;
+        mode = ((s_anim_frame / 20) % 3 == 2) ? 2 : 1;
+    }
+
+    int y = a.y1;
+    bool alt = false;
+    if (kind == FK_SPECTRUM && mode == 1) {
+        // pilot tone: even red/cyan bands rolling slowly
+        const int h = 5;
+        y -= (int)((s_anim_frame * 3) % (2 * h));
+        while (y <= a.y2) {
+            draw_band(dc, &d, &a, y, y + h - 1, alt ? 0x00c8c8 : 0xc80000);
+            alt = !alt;
+            y += h;
+        }
+    } else if (kind == FK_SPECTRUM) {
+        // data: thin blue/yellow bands of random height (0 and 1 bits)
+        while (y <= a.y2) {
+            int h = 1 + (int)(xorshift(rng) % 3);
+            draw_band(dc, &d, &a, y, y + h - 1, alt ? 0xc8c800 : 0x0000c8);
+            alt = !alt;
+            y += h;
+        }
+    } else if (kind == FK_CPC) {
+        if (mode == 1) {
+            const int h = 4;
+            y -= (int)((s_anim_frame * 2) % (2 * h));
+            while (y <= a.y2) {
+                draw_band(dc, &d, &a, y, y + h - 1, alt ? 0xffff00 : 0x0000ff);
+                alt = !alt;
+                y += h;
+            }
+        } else {
+            while (y <= a.y2) {
+                int h = 1 + (int)(xorshift(rng) % 4);
+                draw_band(dc, &d, &a, y, y + h - 1, CPC_PAL[xorshift(rng) % (sizeof(CPC_PAL) / 4)]);
+                y += h;
+            }
+        }
+    } else {   // FK_C64: raster bars
+        int maxh = mode == 1 ? 3 : 6;
+        while (y <= a.y2) {
+            int h = 2 + (int)(xorshift(rng) % maxh);
+            draw_band(dc, &d, &a, y, y + h - 1, C64_PAL[xorshift(rng) % 16]);
+            y += h;
+        }
+    }
+}
+
+static void anim_timer_cb(lv_timer_t *t)
+{
+    tape_status_t st;
+    tape_get_status(&st);
+
+    uint8_t mode = 0;
+    FrameKind kind = s_play_kind;
+    if (st.state == TAPE_PLAYING) {
+        if (st.block_id == BLK_C64TAP) kind = FK_C64;
+        else if (st.block_id == BLK_ORIC || st.block_id == BLK_JTAP) kind = FK_STATIC;
+        if (kind == FK_STATIC && s_placeholder) kind = FK_SPECTRUM;   // placeholder always "loads"
+    }
+    if (st.state == TAPE_PLAYING && kind != FK_STATIC) {
+        mode = 4;                   // live: follow the real signal (silence draws the silent colour)
+    } else if (s_placeholder && st.state == TAPE_STOPPED) {
+        mode = 3;                   // idle placeholder: gentle fake loading loop
+    }
+
+#if UI_ANIM_SELFTEST
+    mode = 2; kind = FK_SPECTRUM;
+#endif
+    bool changed = mode != s_anim_mode || kind != s_anim_kind;
+    s_anim_mode = mode;
+    s_anim_kind = kind;
+    if (mode == 3 && !changed && (++s_anim_frame & 1)) return;   // placeholder at half rate
+    if (mode || changed) {
+        s_anim_frame++;
+        lv_obj_invalidate(tv_frame);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Preview content
+
+static void set_border_for(System frame_sys)
+{
+    lv_obj_set_style_bg_color(tv_frame, lv_color_hex(SYS[frame_sys].border), 0);
+}
+
+static void show_badge(System sys, System frame_sys)
+{
+    lv_obj_add_flag(img_cover, LV_OBJ_FLAG_HIDDEN);
+    set_border_for(frame_sys);
+    s_placeholder = (sys == SYS_TAPE || sys == SYS_NONE);
+    if (s_placeholder) {
+        lv_obj_add_flag(badge, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(placeholder_lbl, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_add_flag(placeholder_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(badge, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_bg_color(badge, lv_color_hex(SYS[sys].bg), 0);
+    lv_obj_set_style_text_color(badge_lbl, lv_color_hex(SYS[sys].fg), 0);
+    lv_label_set_text(badge_lbl, SYS[sys].text);
+    for (int i = 0; i < 4; i++) lv_obj_set_style_bg_color(badge_stripes[i], lv_color_hex(SYS[sys].s[i]), 0);
+}
+
+static void show_cover_image(lv_img_dsc_t *img, System frame_sys)
 {
     lv_img_set_src(img_cover, img);
     lv_obj_clear_flag(img_cover, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(badge, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(placeholder_lbl, LV_OBJ_FLAG_HIDDEN);
+    s_placeholder = false;
+    set_border_for(frame_sys);
     if (s_cover_img) {
         lv_img_cache_invalidate_src(s_cover_img);
         cover_free(s_cover_img);
@@ -182,8 +499,8 @@ enum JobType { JOB_SCAN, JOB_COVER, JOB_REMOUNT };
 struct Job {
     JobType type;
     char path[256];      // directory for SCAN, file (or dir) for COVER
-    int select;          // SCAN: entry name to select afterwards is in 'name'
-    char name[128];
+    int select;          // COVER: request sequence number
+    char name[128];      // SCAN: entry name to select afterwards
 };
 
 static QueueHandle_t s_jobs;
@@ -226,7 +543,6 @@ static void do_scan(const Job &j)
         return strcasecmp(a.name.c_str(), b.name.c_str()) < 0;
     });
     ESP_LOGI(TAG, "scan %s: %u entries%s", j.path, (unsigned)v.size(), d ? "" : " (open failed)");
-    for (size_t i = 0; i < v.size() && i < 40; i++) ESP_LOGI(TAG, "  %s %s (%u)", v[i].dir ? "[D]" : "   ", v[i].name.c_str(), (unsigned)v[i].size);
 
     bsp_display_lock(0);
     s_entries.swap(v);
@@ -257,6 +573,7 @@ static void do_cover(const Job &j, uint32_t seq)
 
     struct stat st;
     bool is_dir = stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    System frame_sys = frame_system_for(path, is_dir);
     if (!is_dir) {
         // 1. game.jpg / game.png next to game.tzx
         size_t dot = path.rfind('.');
@@ -264,7 +581,7 @@ static void do_cover(const Job &j, uint32_t seq)
         static const char *img_ext[] = { ".jpg", ".png", ".jpeg", NULL };
         for (int i = 0; img_ext[i] && !img; i++) {
             std::string p = stem + img_ext[i];
-            if (file_exists(p)) img = cover_decode(p.c_str(), COVER_W, COVER_H);
+            if (file_exists(p)) img = cover_decode(p.c_str(), SCREEN_W, SCREEN_H);
         }
         dir = parent_of(path);
     } else {
@@ -276,7 +593,7 @@ static void do_cover(const Job &j, uint32_t seq)
         if (seq != s_cover_seq) return;
         for (const char *f : { "folder.jpg", "folder.png" }) {
             std::string p = join(dir, f);
-            if (file_exists(p)) { img = cover_decode(p.c_str(), COVER_W, COVER_H); if (img) break; }
+            if (file_exists(p)) { img = cover_decode(p.c_str(), SCREEN_W, SCREEN_H); if (img) break; }
         }
         if (img) break;
         size_t slash = dir.rfind('/');
@@ -284,13 +601,13 @@ static void do_cover(const Job &j, uint32_t seq)
         if (dir == SD_MOUNT) break;
         dir = parent_of(dir);
     }
-    // 3. fall back to a badge from the file type
-    if (!img && sys == SYS_NONE) sys = is_dir ? SYS_TAPE : system_from_ext(ext_of(path));
+    // 3. nothing found: the default "loading screen" placeholder
+    if (!img && sys == SYS_NONE) sys = SYS_TAPE;
 
     bsp_display_lock(0);
     if (seq == s_cover_seq) {
-        if (img) show_cover_image(img);
-        else show_badge(sys);
+        if (img) show_cover_image(img, frame_sys);
+        else show_badge(sys, frame_sys);
         img = NULL;
     }
     bsp_display_unlock();
@@ -355,6 +672,9 @@ static void list_item_cb(lv_event_t *e);
 static void add_item(const char *icon, const char *text, intptr_t tag, bool selected)
 {
     lv_obj_t *b = lv_list_add_btn(list, icon, text);
+    lv_obj_add_style(b, &st_item, 0);
+    lv_obj_add_style(b, &st_item_chk, LV_STATE_CHECKED);
+    lv_obj_add_style(b, &st_item_pr, LV_STATE_PRESSED);
     lv_obj_set_height(b, 44);
     lv_obj_set_style_text_font(b, &lv_font_montserrat_16, 0);
     lv_obj_add_event_cb(b, list_item_cb, LV_EVENT_CLICKED, (void *)tag);
@@ -375,6 +695,9 @@ static void rebuild_list(void)
     if (s_entries.empty()) {
         lv_obj_t *l = lv_list_add_text(list, "No tape files here");
         lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_bg_opa(l, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_text_color(l, lv_color_hex(0x9aa8c0), 0);
+        lv_obj_set_user_data(l, (void *)(intptr_t)-100);
     }
     int pages = ((int)s_entries.size() + PAGE_SIZE - 1) / PAGE_SIZE;
     if (s_page > 0) add_item(LV_SYMBOL_UP, "Previous page", TAG_PREV_PAGE, false);
@@ -419,8 +742,8 @@ static void update_preview(void)
         lv_label_set_text(lbl_info, "Folder");
     } else {
         const char *fmt = format_name(ext_of(en.name));
-        if (en.size >= 10240) lv_label_set_text_fmt(lbl_info, "%s\n%u KB", fmt, (unsigned)(en.size / 1024));
-        else lv_label_set_text_fmt(lbl_info, "%s\n%u bytes", fmt, (unsigned)en.size);
+        if (en.size >= 10240) lv_label_set_text_fmt(lbl_info, "%s  " LV_SYMBOL_BULLET "  %u KB", fmt, (unsigned)(en.size / 1024));
+        else lv_label_set_text_fmt(lbl_info, "%s  " LV_SYMBOL_BULLET "  %u bytes", fmt, (unsigned)en.size);
     }
     request_cover(join(s_dir, en.name));
 }
@@ -456,6 +779,9 @@ static void play_selected(void)
         if (s_sel < 0 || s_entries[s_sel].dir) return;
     }
     s_playing = join(s_dir, s_entries[s_sel].name);
+    System psys = frame_system_for(s_playing, false);
+    s_play_kind = SYS[psys].kind;
+    s_silent_col = SYS[psys].border;
     tape_play(s_playing.c_str());
 }
 
@@ -488,6 +814,125 @@ static void step_file(int dir)
 }
 
 // ---------------------------------------------------------------------------
+// Styles
+
+static void init_styles(void)
+{
+    lv_style_init(&st_screen);
+    lv_style_set_bg_color(&st_screen, lv_color_hex(0x060a14));
+    lv_style_set_bg_grad_color(&st_screen, lv_color_hex(0x1a2740));
+    lv_style_set_bg_grad_dir(&st_screen, LV_GRAD_DIR_VER);
+    lv_style_set_bg_opa(&st_screen, LV_OPA_COVER);
+
+    // Glass panel: opaque gradient (cheap) + thin light edge
+    lv_style_init(&st_glass);
+    lv_style_set_bg_color(&st_glass, lv_color_hex(0x223352));
+    lv_style_set_bg_grad_color(&st_glass, lv_color_hex(0x0e1628));
+    lv_style_set_bg_grad_dir(&st_glass, LV_GRAD_DIR_VER);
+    lv_style_set_bg_opa(&st_glass, LV_OPA_COVER);
+    lv_style_set_border_color(&st_glass, lv_color_hex(0xa8c4ff));
+    lv_style_set_border_opa(&st_glass, LV_OPA_40);
+    lv_style_set_border_width(&st_glass, 1);
+    lv_style_set_radius(&st_glass, 12);
+    lv_style_set_shadow_width(&st_glass, 0);
+    lv_style_set_pad_all(&st_glass, 6);
+    lv_style_set_text_color(&st_glass, lv_color_hex(0xe6ecf8));
+
+    // Glass button: gradient set per button, bright rim, no shadow
+    lv_style_init(&st_btn);
+    lv_style_set_radius(&st_btn, 14);
+    lv_style_set_bg_grad_dir(&st_btn, LV_GRAD_DIR_VER);
+    lv_style_set_bg_opa(&st_btn, LV_OPA_COVER);
+    lv_style_set_border_color(&st_btn, lv_color_hex(0xffffff));
+    lv_style_set_border_opa(&st_btn, LV_OPA_40);
+    lv_style_set_border_width(&st_btn, 1);
+    lv_style_set_shadow_width(&st_btn, 0);
+    lv_style_set_text_color(&st_btn, lv_color_hex(0xffffff));
+
+    // List rows
+    lv_style_init(&st_item);
+    lv_style_set_bg_opa(&st_item, LV_OPA_TRANSP);
+    lv_style_set_text_color(&st_item, lv_color_hex(0xe2e8f4));
+    lv_style_set_border_side(&st_item, LV_BORDER_SIDE_BOTTOM);
+    lv_style_set_border_color(&st_item, lv_color_hex(0xffffff));
+    lv_style_set_border_opa(&st_item, LV_OPA_10);
+    lv_style_set_border_width(&st_item, 1);
+    lv_style_set_radius(&st_item, 8);
+
+    lv_style_init(&st_item_chk);
+    lv_style_set_bg_opa(&st_item_chk, LV_OPA_COVER);
+    lv_style_set_bg_color(&st_item_chk, lv_color_hex(0x3a78e0));
+    lv_style_set_bg_grad_color(&st_item_chk, lv_color_hex(0x1c3f86));
+    lv_style_set_bg_grad_dir(&st_item_chk, LV_GRAD_DIR_VER);
+    lv_style_set_border_side(&st_item_chk, LV_BORDER_SIDE_FULL);
+    lv_style_set_border_color(&st_item_chk, lv_color_hex(0x9cc2ff));
+    lv_style_set_border_opa(&st_item_chk, LV_OPA_60);
+    lv_style_set_text_color(&st_item_chk, lv_color_hex(0xffffff));
+
+    lv_style_init(&st_item_pr);
+    lv_style_set_bg_opa(&st_item_pr, LV_OPA_COVER);
+    lv_style_set_bg_color(&st_item_pr, lv_color_hex(0x2c3d5e));
+
+    // Progress bar
+    lv_style_init(&st_bar_bg);
+    lv_style_set_bg_color(&st_bar_bg, lv_color_hex(0x0a1120));
+    lv_style_set_bg_opa(&st_bar_bg, LV_OPA_COVER);
+    lv_style_set_border_color(&st_bar_bg, lv_color_hex(0xa8c4ff));
+    lv_style_set_border_opa(&st_bar_bg, LV_OPA_30);
+    lv_style_set_border_width(&st_bar_bg, 1);
+    lv_style_set_radius(&st_bar_bg, 6);
+
+    lv_style_init(&st_bar_ind);
+    lv_style_set_bg_color(&st_bar_ind, lv_color_hex(0x46d8ff));
+    lv_style_set_bg_grad_color(&st_bar_ind, lv_color_hex(0x2a62e8));
+    lv_style_set_bg_grad_dir(&st_bar_ind, LV_GRAD_DIR_HOR);
+    lv_style_set_radius(&st_bar_ind, 6);
+
+    // TV bezel around the preview
+    lv_style_init(&st_bezel);
+    lv_style_set_bg_color(&st_bezel, lv_color_hex(0x2a2f3a));
+    lv_style_set_bg_grad_color(&st_bezel, lv_color_hex(0x0b0d12));
+    lv_style_set_bg_grad_dir(&st_bezel, LV_GRAD_DIR_VER);
+    lv_style_set_bg_opa(&st_bezel, LV_OPA_COVER);
+    lv_style_set_border_color(&st_bezel, lv_color_hex(0xffffff));
+    lv_style_set_border_opa(&st_bezel, LV_OPA_30);
+    lv_style_set_border_width(&st_bezel, 1);
+    lv_style_set_radius(&st_bezel, 10);
+    lv_style_set_pad_all(&st_bezel, 0);
+    lv_style_set_shadow_width(&st_bezel, 0);
+}
+
+static lv_obj_t *glass_panel(lv_obj_t *parent, int x, int y, int w, int h)
+{
+    lv_obj_t *p = lv_obj_create(parent);
+    lv_obj_add_style(p, &st_glass, 0);
+    lv_obj_set_pos(p, x, y);
+    lv_obj_set_size(p, w, h);
+    lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+    return p;
+}
+
+static void style_btn(lv_obj_t *b, uint32_t top, uint32_t bottom)
+{
+    lv_obj_add_style(b, &st_btn, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(top), 0);
+    lv_obj_set_style_bg_grad_color(b, lv_color_hex(bottom), 0);
+}
+
+static lv_obj_t *small_btn(lv_obj_t *parent, const char *sym, lv_event_cb_t cb)
+{
+    lv_obj_t *b = lv_btn_create(parent);
+    lv_obj_set_size(b, 48, 34);
+    style_btn(b, 0x3a4c6e, 0x1a253c);
+    lv_obj_set_style_radius(b, 10, 0);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, sym);
+    lv_obj_center(l);
+    return b;
+}
+
+// ---------------------------------------------------------------------------
 // Transport buttons
 
 enum Btn { B_PREV, B_BLK_PREV, B_PLAY, B_STOP, B_BLK_NEXT, B_NEXT };
@@ -507,12 +952,12 @@ static void transport_cb(lv_event_t *e)
     }
 }
 
-static lv_obj_t *make_btn(lv_obj_t *parent, const char *text, intptr_t id, lv_color_t color, lv_obj_t **lbl_out = NULL)
+static lv_obj_t *make_btn(lv_obj_t *parent, const char *text, intptr_t id, uint32_t top, uint32_t bottom,
+                          lv_obj_t **lbl_out = NULL)
 {
     lv_obj_t *b = lv_btn_create(parent);
-    lv_obj_set_size(b, 74, 54);
-    lv_obj_set_style_bg_color(b, color, 0);
-    lv_obj_set_style_radius(b, 10, 0);
+    lv_obj_set_size(b, 72, 52);
+    style_btn(b, top, bottom);
     lv_obj_add_event_cb(b, transport_cb, LV_EVENT_CLICKED, (void *)id);
     lv_obj_t *l = lv_label_create(b);
     lv_label_set_text(l, text);
@@ -537,7 +982,7 @@ static void status_timer_cb(lv_timer_t *t)
 
     int pct = st.size ? (int)((uint64_t)st.pos * 100 / st.size) : 0;
     if (st.state == TAPE_STOPPED) pct = 0;
-    lv_bar_set_value(bar_prog, pct, LV_ANIM_OFF);
+    if (lv_bar_get_value(bar_prog) != pct) lv_bar_set_value(bar_prog, pct, LV_ANIM_OFF);
 
     char buf[96];
     if (st.state == TAPE_STOPPED) {
@@ -549,16 +994,40 @@ static void status_timer_cb(lv_timer_t *t)
         snprintf(buf, sizeof(buf), "%s  %s  %d%%", st.state == TAPE_PAUSED ? "PAUSED" : "PLAY",
                  tape_block_name(st.block_id), pct);
     }
-    lv_label_set_text(lbl_status, buf);
+    if (strcmp(buf, lv_label_get_text(lbl_status)) != 0) lv_label_set_text(lbl_status, buf);
 
+    const char *rem;
+    uint32_t col;
     if (s_settings.motor_auto) {
-        lv_label_set_text(lbl_rem, st.motor_on ? "REM " LV_SYMBOL_PLAY : "REM " LV_SYMBOL_PAUSE);
-        lv_obj_set_style_text_color(lbl_rem, st.motor_on ? lv_color_hex(0x40e070) : lv_color_hex(0xe0a040), 0);
+        rem = st.motor_on ? "REM " LV_SYMBOL_PLAY : "REM " LV_SYMBOL_PAUSE;
+        col = st.motor_on ? 0x40e070 : 0xe0a040;
     } else {
-        lv_label_set_text(lbl_rem, "FORCE RUN");
-        lv_obj_set_style_text_color(lbl_rem, lv_color_hex(0x8090a0), 0);
+        rem = "FORCE RUN";
+        col = 0x8090a0;
+    }
+    if (strcmp(rem, lv_label_get_text(lbl_rem)) != 0) {
+        lv_label_set_text(lbl_rem, rem);
+        lv_obj_set_style_text_color(lbl_rem, lv_color_hex(col), 0);
     }
 }
+
+#if UI_PERF_LOG
+static void perf_monitor_cb(lv_disp_drv_t *drv, uint32_t time_ms, uint32_t px)
+{
+    // Every ~5 s of activity: frames drawn and time per frame (core 0 load ~= frames * avg / 5000)
+    static uint32_t n = 0, sum = 0, mx = 0, t0 = 0;
+    uint32_t now = lv_tick_get();
+    if (n == 0) t0 = now;
+    n++;
+    sum += time_ms;
+    if (time_ms > mx) mx = time_ms;
+    if (now - t0 >= 5000) {
+        ESP_LOGI(TAG, "render: %u frames in %u ms, avg %u ms, max %u ms", (unsigned)n, (unsigned)(now - t0),
+                 (unsigned)(sum / n), (unsigned)mx);
+        n = sum = mx = 0;
+    }
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Settings screen
@@ -619,9 +1088,10 @@ static void open_settings_cb(lv_event_t *e)
 static lv_obj_t *settings_row(lv_obj_t *parent, const char *title, const char *hint)
 {
     lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_add_style(row, &st_glass, 0);
+    lv_obj_set_style_radius(row, 10, 0);
     lv_obj_set_style_pad_all(row, 8, 0);
-    lv_obj_set_style_bg_opa(row, LV_OPA_20, 0);
+    lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *t = lv_label_create(row);
     lv_label_set_text(t, title);
@@ -631,7 +1101,7 @@ static lv_obj_t *settings_row(lv_obj_t *parent, const char *title, const char *h
         lv_obj_t *h = lv_label_create(row);
         lv_label_set_text(h, hint);
         lv_obj_set_style_text_font(h, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(h, lv_color_hex(0x9aa4b4), 0);
+        lv_obj_set_style_text_color(h, lv_color_hex(0x9aa8c0), 0);
         lv_obj_align(h, LV_ALIGN_TOP_LEFT, 0, 22);
     }
     return row;
@@ -650,31 +1120,33 @@ static lv_obj_t *settings_switch(lv_obj_t *parent, const char *title, const char
 static void build_settings(void)
 {
     scr_settings = lv_obj_create(NULL);
-    lv_obj_t *hdr = lv_obj_create(scr_settings);
-    lv_obj_set_size(hdr, 480, 48);
-    lv_obj_set_pos(hdr, 0, 0);
-    lv_obj_set_style_radius(hdr, 0, 0);
-    lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_style(scr_settings, &st_screen, 0);
+    lv_obj_clear_flag(scr_settings, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *hdr = glass_panel(scr_settings, 4, 4, 472, 46);
     lv_obj_t *t = lv_label_create(hdr);
     lv_label_set_text(t, LV_SYMBOL_SETTINGS "  Options");
     lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
-    lv_obj_align(t, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, 4, 0);
     lv_obj_t *done = lv_btn_create(hdr);
-    lv_obj_set_size(done, 100, 40);
-    lv_obj_align(done, LV_ALIGN_RIGHT_MID, 6, 0);
+    lv_obj_set_size(done, 100, 34);
+    style_btn(done, 0x3a8ef0, 0x1d4fa8);
+    lv_obj_set_style_radius(done, 10, 0);
+    lv_obj_align(done, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_add_event_cb(done, settings_done_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *dl = lv_label_create(done);
     lv_label_set_text(dl, LV_SYMBOL_OK " Done");
     lv_obj_center(dl);
 
     lv_obj_t *body = lv_obj_create(scr_settings);
-    lv_obj_set_size(body, 480, 272);
-    lv_obj_set_pos(body, 0, 48);
-    lv_obj_set_style_radius(body, 0, 0);
+    lv_obj_set_size(body, 480, 266);
+    lv_obj_set_pos(body, 0, 54);
+    lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(body, 0, 0);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(body, 6, 0);
-    lv_obj_set_style_pad_all(body, 8, 0);
+    lv_obj_set_style_pad_hor(body, 4, 0);
+    lv_obj_set_style_pad_ver(body, 2, 0);
 
     lv_obj_t *r = settings_row(body, "Baud (TSX / CAS / CDT speed-up)", NULL);
     bm_baud = lv_btnmatrix_create(r);
@@ -683,6 +1155,8 @@ static void build_settings(void)
     lv_btnmatrix_set_one_checked(bm_baud, true);
     lv_obj_set_size(bm_baud, lv_pct(100), 52);
     lv_obj_align(bm_baud, LV_ALIGN_TOP_LEFT, 0, 26);
+    lv_obj_set_style_bg_opa(bm_baud, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bm_baud, 0, 0);
     lv_obj_add_event_cb(bm_baud, setting_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     sw_motor = settings_switch(body, "Motor: Auto REM", "On: REM jack pauses/plays. Off: force run");
@@ -691,13 +1165,16 @@ static void build_settings(void)
     r = settings_row(body, "Speaker volume", NULL);
     sl_vol = lv_slider_create(r);
     lv_slider_set_range(sl_vol, 0, 100);
-    lv_obj_set_size(sl_vol, 300, 18);
-    lv_obj_align(sl_vol, LV_ALIGN_TOP_LEFT, 8, 32);
+    lv_obj_set_size(sl_vol, 290, 16);
+    lv_obj_align(sl_vol, LV_ALIGN_TOP_LEFT, 8, 34);
+    lv_obj_add_style(sl_vol, &st_bar_ind, LV_PART_INDICATOR);
     lv_obj_add_event_cb(sl_vol, setting_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lbl_vol = lv_label_create(r);
-    lv_obj_align(lbl_vol, LV_ALIGN_TOP_LEFT, 320, 30);
+    lv_obj_align(lbl_vol, LV_ALIGN_TOP_LEFT, 314, 32);
     lv_obj_t *tb = lv_btn_create(r);
-    lv_obj_set_size(tb, 76, 40);
+    lv_obj_set_size(tb, 80, 40);
+    style_btn(tb, 0x3a4c6e, 0x1a253c);
+    lv_obj_set_style_radius(tb, 10, 0);
     lv_obj_align(tb, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_add_event_cb(tb, [](lv_event_t *e) { monitor_test_beep(700); }, LV_EVENT_CLICKED, NULL);
     lv_obj_t *tl = lv_label_create(tb);
@@ -726,29 +1203,20 @@ static void refresh_cb(lv_event_t *e)
 static void build_main(void)
 {
     scr_main = lv_obj_create(NULL);
+    lv_obj_add_style(scr_main, &st_screen, 0);
     lv_obj_clear_flag(scr_main, LV_OBJ_FLAG_SCROLLABLE);
 
     // Header
-    lv_obj_t *hdr = lv_obj_create(scr_main);
-    lv_obj_set_size(hdr, 480, 44);
-    lv_obj_set_pos(hdr, 0, 0);
-    lv_obj_set_style_radius(hdr, 0, 0);
-    lv_obj_set_style_pad_all(hdr, 4, 0);
-    lv_obj_set_style_bg_color(hdr, lv_color_hex(0x182030), 0);
-    lv_obj_set_style_border_width(hdr, 0, 0);
-    lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *back = lv_btn_create(hdr);
-    lv_obj_set_size(back, 48, 36);
+    lv_obj_t *hdr = glass_panel(scr_main, 4, 4, 472, 42);
+    lv_obj_set_style_pad_all(hdr, 3, 0);
+    lv_obj_t *back = small_btn(hdr, LV_SYMBOL_LEFT, back_cb);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *bl = lv_label_create(back);
-    lv_label_set_text(bl, LV_SYMBOL_LEFT);
-    lv_obj_center(bl);
 
     lbl_path = lv_label_create(hdr);
     lv_obj_set_width(lbl_path, 220);
+    // Scrolls when too long; with the shadow frame buffer only this label redraws
     lv_label_set_long_mode(lbl_path, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_speed(lbl_path, 18, 0);
     lv_obj_set_style_text_font(lbl_path, &lv_font_montserrat_16, 0);
     lv_obj_align(lbl_path, LV_ALIGN_LEFT_MID, 56, 0);
     lv_label_set_text(lbl_path, "");
@@ -758,130 +1226,139 @@ static void build_main(void)
     lv_obj_align(lbl_rem, LV_ALIGN_RIGHT_MID, -108, 0);
     lv_label_set_text(lbl_rem, "");
 
-    lv_obj_t *refresh = lv_btn_create(hdr);
-    lv_obj_set_size(refresh, 48, 36);
+    lv_obj_t *refresh = small_btn(hdr, LV_SYMBOL_REFRESH, refresh_cb);
     lv_obj_align(refresh, LV_ALIGN_RIGHT_MID, -52, 0);
-    lv_obj_add_event_cb(refresh, refresh_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *rl = lv_label_create(refresh);
-    lv_label_set_text(rl, LV_SYMBOL_REFRESH);
-    lv_obj_center(rl);
-
-    lv_obj_t *gear = lv_btn_create(hdr);
-    lv_obj_set_size(gear, 48, 36);
+    lv_obj_t *gear = small_btn(hdr, LV_SYMBOL_SETTINGS, open_settings_cb);
     lv_obj_align(gear, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_add_event_cb(gear, open_settings_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *gl = lv_label_create(gear);
-    lv_label_set_text(gl, LV_SYMBOL_SETTINGS);
-    lv_obj_center(gl);
 
-    // File list
+    // File list (the list itself is a glass panel)
     list = lv_list_create(scr_main);
-    lv_obj_set_size(list, 292, 190);
-    lv_obj_set_pos(list, 0, 44);
-    lv_obj_set_style_radius(list, 0, 0);
-    lv_obj_set_style_pad_all(list, 2, 0);
-    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_add_style(list, &st_glass, 0);
+    lv_obj_set_pos(list, 4, 50);
+    lv_obj_set_size(list, 286, 184);
+    lv_obj_set_style_pad_all(list, 4, 0);
+    lv_obj_set_style_pad_row(list, 2, 0);
 
     // Preview pane
-    lv_obj_t *pv = lv_obj_create(scr_main);
-    lv_obj_set_size(pv, 188, 190);
-    lv_obj_set_pos(pv, 292, 44);
-    lv_obj_set_style_radius(pv, 0, 0);
-    lv_obj_set_style_pad_all(pv, 6, 0);
-    lv_obj_set_style_border_width(pv, 0, 0);
-    lv_obj_set_style_bg_color(pv, lv_color_hex(0x10141c), 0);
-    lv_obj_clear_flag(pv, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *pv = glass_panel(scr_main, 294, 50, 182, 184);
 
-    cover_box = lv_obj_create(pv);
-    lv_obj_set_size(cover_box, COVER_W, COVER_H);
-    lv_obj_align(cover_box, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_pad_all(cover_box, 0, 0);
-    lv_obj_set_style_border_width(cover_box, 0, 0);
-    lv_obj_set_style_bg_color(cover_box, lv_color_hex(0x000000), 0);
-    lv_obj_clear_flag(cover_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *bezel = lv_obj_create(pv);
+    lv_obj_add_style(bezel, &st_bezel, 0);
+    lv_obj_set_size(bezel, TV_FRAME_W + 10, TV_FRAME_H + 10);
+    lv_obj_align(bezel, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_clear_flag(bezel, LV_OBJ_FLAG_SCROLLABLE);
 
-    img_cover = lv_img_create(cover_box);
+    tv_frame = lv_obj_create(bezel);
+    lv_obj_remove_style_all(tv_frame);
+    lv_obj_set_size(tv_frame, TV_FRAME_W, TV_FRAME_H);
+    lv_obj_center(tv_frame);
+    lv_obj_set_style_bg_opa(tv_frame, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(tv_frame, lv_color_hex(SYS[SYS_TAPE].border), 0);
+    lv_obj_clear_flag(tv_frame, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(tv_frame, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(tv_frame, frame_draw_cb, LV_EVENT_DRAW_MAIN_END, NULL);
+
+    tv_screen = lv_obj_create(tv_frame);
+    lv_obj_remove_style_all(tv_screen);
+    lv_obj_set_size(tv_screen, SCREEN_W, SCREEN_H);
+    lv_obj_center(tv_screen);
+    lv_obj_set_style_bg_opa(tv_screen, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(tv_screen, lv_color_hex(0x000000), 0);
+    lv_obj_clear_flag(tv_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    img_cover = lv_img_create(tv_screen);
     lv_obj_center(img_cover);
     lv_obj_add_flag(img_cover, LV_OBJ_FLAG_HIDDEN);
 
-    badge = lv_obj_create(cover_box);
-    lv_obj_set_size(badge, COVER_W, COVER_H);
+    placeholder_lbl = lv_label_create(tv_screen);
+    lv_label_set_text(placeholder_lbl, LV_SYMBOL_AUDIO);
+    lv_obj_set_style_text_font(placeholder_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(placeholder_lbl, lv_color_hex(0x2a3344), 0);
+    lv_obj_center(placeholder_lbl);
+
+    badge = lv_obj_create(tv_screen);
+    lv_obj_remove_style_all(badge);
+    lv_obj_set_size(badge, SCREEN_W, SCREEN_H);
     lv_obj_center(badge);
-    lv_obj_set_style_radius(badge, 8, 0);
-    lv_obj_set_style_border_width(badge, 0, 0);
-    lv_obj_set_style_pad_all(badge, 0, 0);
+    lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
     lv_obj_clear_flag(badge, LV_OBJ_FLAG_SCROLLABLE);
     for (int i = 0; i < 4; i++) {
         badge_stripes[i] = lv_obj_create(badge);
-        lv_obj_set_size(badge_stripes[i], 10, 70);
-        lv_obj_set_style_radius(badge_stripes[i], 0, 0);
-        lv_obj_set_style_border_width(badge_stripes[i], 0, 0);
-        lv_obj_align(badge_stripes[i], LV_ALIGN_RIGHT_MID, -12 - (3 - i) * 12, 0);
-        lv_obj_set_style_transform_angle(badge_stripes[i], 0, 0);
+        lv_obj_remove_style_all(badge_stripes[i]);
+        lv_obj_set_style_bg_opa(badge_stripes[i], LV_OPA_COVER, 0);
+        lv_obj_set_size(badge_stripes[i], 7, 56);
+        lv_obj_align(badge_stripes[i], LV_ALIGN_RIGHT_MID, -8 - (3 - i) * 9, 0);
     }
     badge_lbl = lv_label_create(badge);
-    lv_obj_set_style_text_font(badge_lbl, &lv_font_montserrat_20, 0);
-    lv_obj_align(badge_lbl, LV_ALIGN_LEFT_MID, 12, 0);
-    show_badge(SYS_TAPE);
+    lv_obj_set_style_text_font(badge_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(badge_lbl, LV_ALIGN_LEFT_MID, 8, 0);
+    show_badge(SYS_TAPE, SYS_TAPE);
 
     lbl_name = lv_label_create(pv);
-    lv_obj_set_width(lbl_name, 176);
-    lv_label_set_long_mode(lbl_name, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_name, 168);
+    lv_label_set_long_mode(lbl_name, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_speed(lbl_name, 18, 0);
     lv_obj_set_height(lbl_name, 20);
     lv_obj_set_style_text_font(lbl_name, &lv_font_montserrat_16, 0);
-    lv_obj_align(lbl_name, LV_ALIGN_TOP_LEFT, 0, COVER_H + 4);
+    lv_obj_align(lbl_name, LV_ALIGN_TOP_LEFT, 0, TV_FRAME_H + 16);
     lv_label_set_text(lbl_name, "TouchDuino");
 
     lbl_info = lv_label_create(pv);
-    lv_obj_set_width(lbl_info, 176);
+    lv_obj_set_width(lbl_info, 168);
+    lv_label_set_long_mode(lbl_info, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(lbl_info, 16);
     lv_obj_set_style_text_font(lbl_info, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(lbl_info, lv_color_hex(0x9aa4b4), 0);
-    lv_obj_align(lbl_info, LV_ALIGN_TOP_LEFT, 0, COVER_H + 26);
+    lv_obj_set_style_text_color(lbl_info, lv_color_hex(0x9aa8c0), 0);
+    lv_obj_align(lbl_info, LV_ALIGN_TOP_LEFT, 0, TV_FRAME_H + 38);
     lv_label_set_text(lbl_info, "");
 
     // Progress row
     bar_prog = lv_bar_create(scr_main);
-    lv_obj_set_size(bar_prog, 180, 14);
-    lv_obj_set_pos(bar_prog, 8, 242);
+    lv_obj_add_style(bar_prog, &st_bar_bg, LV_PART_MAIN);
+    lv_obj_add_style(bar_prog, &st_bar_ind, LV_PART_INDICATOR);
+    lv_obj_set_size(bar_prog, 168, 12);
+    lv_obj_set_pos(bar_prog, 10, 242);
     lv_bar_set_range(bar_prog, 0, 100);
 
     lbl_status = lv_label_create(scr_main);
-    lv_obj_set_width(lbl_status, 280);
+    lv_obj_set_width(lbl_status, 284);
     lv_label_set_long_mode(lbl_status, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_14, 0);
-    lv_obj_set_pos(lbl_status, 196, 239);
+    lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xd6e2f6), 0);
+    lv_obj_set_pos(lbl_status, 188, 239);
     lv_label_set_text(lbl_status, "Ready");
 
     // Transport
     lv_obj_t *row = lv_obj_create(scr_main);
+    lv_obj_remove_style_all(row);
     lv_obj_set_size(row, 480, 62);
     lv_obj_set_pos(row, 0, 258);
-    lv_obj_set_style_radius(row, 0, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 4, 0);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    lv_color_t grey = lv_color_hex(0x3a4456), blue = lv_color_hex(0x2a5fa8);
-    make_btn(row, LV_SYMBOL_PREV, B_PREV, grey);
-    make_btn(row, LV_SYMBOL_LEFT LV_SYMBOL_LEFT, B_BLK_PREV, grey);
-    make_btn(row, LV_SYMBOL_PLAY, B_PLAY, lv_color_hex(0x1f8a4c), &lbl_play);
-    make_btn(row, LV_SYMBOL_STOP, B_STOP, lv_color_hex(0xa83232));
-    make_btn(row, LV_SYMBOL_RIGHT LV_SYMBOL_RIGHT, B_BLK_NEXT, grey);
-    make_btn(row, LV_SYMBOL_NEXT, B_NEXT, grey);
-    (void)blue;
+    const uint32_t g_top = 0x46597e, g_bot = 0x1a2438;
+    make_btn(row, LV_SYMBOL_PREV, B_PREV, g_top, g_bot);
+    make_btn(row, LV_SYMBOL_LEFT LV_SYMBOL_LEFT, B_BLK_PREV, g_top, g_bot);
+    make_btn(row, LV_SYMBOL_PLAY, B_PLAY, 0x3fd27f, 0x14693a, &lbl_play);
+    make_btn(row, LV_SYMBOL_STOP, B_STOP, 0xf0605a, 0x8a1f1f);
+    make_btn(row, LV_SYMBOL_RIGHT LV_SYMBOL_RIGHT, B_BLK_NEXT, g_top, g_bot);
+    make_btn(row, LV_SYMBOL_NEXT, B_NEXT, g_top, g_bot);
 }
 
 extern "C" void ui_init(const tape_settings_t *settings, const char *start_dir)
 {
     s_settings = *settings;
     lv_disp_t *disp = lv_disp_get_default();
-    lv_theme_t *th = lv_theme_default_init(disp, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_TEAL),
+    lv_theme_t *th = lv_theme_default_init(disp, lv_color_hex(0x3a78e0), lv_color_hex(0x46d8ff),
                                            true, &lv_font_montserrat_14);
     lv_disp_set_theme(disp, th);
+#if UI_PERF_LOG
+    disp->driver->monitor_cb = perf_monitor_cb;
+#endif
 
+    init_styles();
     build_main();
     build_settings();
     lv_scr_load(scr_main);
@@ -890,6 +1367,7 @@ extern "C" void ui_init(const tape_settings_t *settings, const char *start_dir)
     xTaskCreatePinnedToCore(worker_task, "ui_worker", 8192, NULL, 3, NULL, 0);
 
     lv_timer_create(status_timer_cb, 100, NULL);
+    lv_timer_create(anim_timer_cb, ANIM_PERIOD_MS, NULL);
 
     std::string dir = start_dir && strncmp(start_dir, SD_MOUNT, strlen(SD_MOUNT)) == 0 ? start_dir : SD_MOUNT;
     request_scan(dir);

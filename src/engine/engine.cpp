@@ -289,8 +289,25 @@ static void update_status(void)
     st.block_count = (int)s_blocks.size();
     st.block_id = currentID;
     st.motor_on = motor_line_on();
-    strncpy(st.msg, s_msg, sizeof(st.msg) - 1);
-    strncpy(st.file, fileName, sizeof(st.file) - 1);
+    st.phase = TAPE_PHASE_IDLE;
+    if (start == 1 && !pauseOn) {
+        if (currentID == BLOCKID::IDPAUSE || currentBlockTask == BLOCKTASK::PAUSE) {
+            st.phase = TAPE_PHASE_GAP;
+        } else {
+            switch (currentBlockTask) {
+                case BLOCKTASK::PILOT:
+                case BLOCKTASK::SYNC1:
+                case BLOCKTASK::SYNC2:
+                    st.phase = TAPE_PHASE_PILOT;
+                    break;
+                default:
+                    st.phase = TAPE_PHASE_DATA;
+                    break;
+            }
+        }
+    }
+    snprintf(st.msg, sizeof(st.msg), "%s", s_msg);
+    snprintf(st.file, sizeof(st.file), "%s", fileName);
     noInterrupts();
     memcpy((void *)&s_status, &st, sizeof(st));
     interrupts();
