@@ -101,3 +101,8 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - Machines available: ZX Spectrum, BBC Micro, MSX, Oric Atmos (a scratch-built one, so the REM relay can be seen and heard; the MSX REM relay is audible too). The Oric and MSX are the best REM test machines.
 - Build the line-out filter from `images/line-out.png` (C2 + toward the board). Note per machine: loads / fails partway / never starts, and the file used.
 - Verified on the board so far: speaker, TAP/TZX playback, live border, card swap, browse lock, End of tape, long-gap shortening (matches an Android player; MaxDuino on a TZXduino plays the full 35 s gap).
+
+## Spectrum loading screens (2026-11-15)
+- `cover_from_spectrum_tape()` in cover.cpp: walks TZX (ID10/11/14 data) or TAP blocks, finds a SCREEN$ (a "CODE 16384,6912" header + data block, else a headerless 6914-byte block with flag 0xFF), decodes the 6912 bytes (interleaved bitmap + attributes, BRIGHT 0xFF / normal 0xD7) to 256x192 and box-filter scales it to the TV screen (122x92).
+- Preview order: game.jpg/png -> tape loading screen -> folder.jpg/png -> system badge -> placeholder. Verified on DNA Warrior 2026-11-15.
+- Idea for later: draw the screen in live while it loads (Spectrum third-by-third order).

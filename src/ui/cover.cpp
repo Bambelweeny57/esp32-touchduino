@@ -164,6 +164,179 @@ lv_img_dsc_t *cover_decode(const char *path, int max_w, int max_h)
     return img;
 }
 
+// ---- ZX Spectrum loading screens ------------------------------------------
+//
+// A SCREEN$ is 6912 bytes of display memory: 6144 bytes of bitmap (in the
+// Spectrum's interleaved row order) then 768 attribute bytes (ink, paper,
+// bright per 8x8 cell). On tape it's a data block of 6914 bytes (flag 0xFF +
+// screen + checksum), usually after a "CODE 16384,6912" header.
+
+#define ZX_SCR_BYTES 6912
+
+struct TapeBlock { uint32_t data; uint32_t len; };   // data = file offset of the block's first byte (flag)
+
+static uint32_t rd16(const uint8_t *p) { return p[0] | (p[1] << 8); }
+static uint32_t rd24(const uint8_t *p) { return p[0] | (p[1] << 8) | ((uint32_t)p[2] << 16); }
+static uint32_t rd32(const uint8_t *p) { return rd24(p) | ((uint32_t)p[3] << 24); }
+
+// List the data blocks (standard, turbo and pure data) of a TZX or TAP file
+static int list_tape_blocks(FILE *f, uint32_t size, bool tzx, TapeBlock *out, int max)
+{
+    int n = 0;
+    uint8_t h[0x14];
+    if (!tzx) {
+        uint32_t off = 0;
+        while (off + 2 <= size && n < max) {
+            if (fseek(f, off, SEEK_SET) || fread(h, 1, 2, f) != 2) break;
+            uint32_t len = rd16(h);
+            if (len == 0 || off + 2 + len > size) break;
+            out[n++] = { off + 2, len };
+            off += 2 + len;
+        }
+        return n;
+    }
+    uint32_t off = 10;
+    for (int guard = 0; off < size && n < max && guard < 2000; guard++) {
+        memset(h, 0, sizeof(h));
+        if (fseek(f, off, SEEK_SET)) break;
+        uint8_t id;
+        if (fread(&id, 1, 1, f) != 1) break;
+        fread(h, 1, sizeof(h), f);
+        uint32_t p = off + 1, len;
+        switch (id) {
+            case 0x10: len = 4 + rd16(h + 2);       out[n++] = { p + 4, rd16(h + 2) };      break;
+            case 0x11: len = 0x12 + rd24(h + 0x0F); out[n++] = { p + 0x12, rd24(h + 0x0F) }; break;
+            case 0x14: len = 0x0A + rd24(h + 7);    out[n++] = { p + 0x0A, rd24(h + 7) };    break;
+            case 0x12: len = 4; break;
+            case 0x13: len = 1 + h[0] * 2; break;
+            case 0x15: len = 8 + rd24(h + 5); break;
+            case 0x18: case 0x19: len = 4 + rd32(h); break;
+            case 0x20: case 0x23: case 0x24: len = 2; break;
+            case 0x21: len = 1 + h[0]; break;
+            case 0x22: case 0x25: case 0x27: len = 0; break;
+            case 0x26: len = 2 + rd16(h) * 2; break;
+            case 0x28: len = 2 + rd16(h); break;
+            case 0x2A: len = 4; break;
+            case 0x2B: len = 5; break;
+            case 0x30: len = 1 + h[0]; break;
+            case 0x31: len = 2 + h[1]; break;
+            case 0x32: len = 2 + rd16(h); break;
+            case 0x33: len = 1 + h[0] * 3; break;
+            case 0x35: len = 0x14 + rd32(h + 0x10); break;
+            case 0x4B: len = 4 + rd32(h); break;
+            case 0x5A: len = 9; break;
+            default:   len = 4 + rd32(h); break;   // TZX extension rule
+        }
+        off = p + len;
+    }
+    return n;
+}
+
+// Find the file offset of the 6912 screen bytes, or 0 if there's no screen
+static uint32_t find_screen(FILE *f, const TapeBlock *b, int n)
+{
+    // 1. A "CODE 16384,6912" header followed by its data block
+    for (int i = 0; i + 1 < n; i++) {
+        if (b[i].len != 19) continue;
+        uint8_t hdr[19];
+        if (fseek(f, b[i].data, SEEK_SET) || fread(hdr, 1, 19, f) != 19) continue;
+        if (hdr[0] == 0x00 && hdr[1] == 3 && rd16(hdr + 12) == ZX_SCR_BYTES && rd16(hdr + 14) == 16384 &&
+            b[i + 1].len >= ZX_SCR_BYTES + 1) {
+            return b[i + 1].data + 1;                     // skip the flag byte
+        }
+    }
+    // 2. Headerless: a data block that is exactly a screen (with flag + checksum)
+    for (int i = 0; i < n; i++) {
+        uint8_t flag;
+        if (b[i].len == ZX_SCR_BYTES + 2) {
+            if (fseek(f, b[i].data, SEEK_SET) || fread(&flag, 1, 1, f) != 1) continue;
+            if (flag == 0xFF) return b[i].data + 1;
+        }
+    }
+    return 0;
+}
+
+// Box-filter downscale of an RGB888 image (keeps 1-pixel detail visible)
+static lv_img_dsc_t *make_scaled_avg(const uint8_t *src, int sw, int sh, int max_w, int max_h)
+{
+    int dw = max_w, dh = (int)((int64_t)sh * max_w / sw);
+    if (dh > max_h) { dh = max_h; dw = (int)((int64_t)sw * max_h / sh); }
+    lv_img_dsc_t *img = (lv_img_dsc_t *)calloc(1, sizeof(lv_img_dsc_t));
+    lv_color_t *px = (lv_color_t *)ps_alloc((size_t)dw * dh * sizeof(lv_color_t));
+    if (!img || !px) { free(img); free(px); return NULL; }
+    for (int y = 0; y < dh; y++) {
+        int y0 = y * sh / dh, y1 = LV_MAX(y0 + 1, (y + 1) * sh / dh);
+        for (int x = 0; x < dw; x++) {
+            int x0 = x * sw / dw, x1 = LV_MAX(x0 + 1, (x + 1) * sw / dw);
+            uint32_t r = 0, g = 0, bl = 0, c = 0;
+            for (int yy = y0; yy < y1; yy++) {
+                const uint8_t *p = src + ((size_t)yy * sw + x0) * 3;
+                for (int xx = x0; xx < x1; xx++, p += 3) { r += p[0]; g += p[1]; bl += p[2]; c++; }
+            }
+            px[(size_t)y * dw + x] = lv_color_make(r / c, g / c, bl / c);
+        }
+    }
+    img->header.cf = LV_IMG_CF_TRUE_COLOR;
+    img->header.w = dw;
+    img->header.h = dh;
+    img->data_size = (uint32_t)dw * dh * sizeof(lv_color_t);
+    img->data = (const uint8_t *)px;
+    return img;
+}
+
+lv_img_dsc_t *cover_from_spectrum_tape(const char *path, int max_w, int max_h)
+{
+    const char *dot = strrchr(path, '.');
+    if (!dot) return NULL;
+    bool tzx = !strcasecmp(dot, ".tzx");
+    if (!tzx && strcasecmp(dot, ".tap")) return NULL;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    uint32_t size = (uint32_t)ftell(f);
+    uint8_t magic[12] = {};
+    fseek(f, 0, SEEK_SET);
+    fread(magic, 1, sizeof(magic), f);
+    lv_img_dsc_t *img = NULL;
+    if ((tzx && memcmp(magic, "ZXTape!\x1A", 8) != 0) || (!tzx && memcmp(magic, "C64-TAPE-RAW", 12) == 0)) {
+        fclose(f);
+        return NULL;
+    }
+
+    static TapeBlock blocks[256];
+    int n = list_tape_blocks(f, size, tzx, blocks, 256);
+    uint32_t scr_off = find_screen(f, blocks, n);
+    uint8_t *scr = scr_off ? (uint8_t *)ps_alloc(ZX_SCR_BYTES) : NULL;
+    if (scr && fseek(f, scr_off, SEEK_SET) == 0 && fread(scr, 1, ZX_SCR_BYTES, f) == ZX_SCR_BYTES) {
+        uint8_t *rgb = (uint8_t *)ps_alloc(256 * 192 * 3);
+        if (rgb) {
+            for (int y = 0; y < 192; y++) {
+                // Spectrum bitmap order: thirds, then character row, then pixel row
+                const uint8_t *row = scr + (((y & 0xC0) << 5) | ((y & 0x07) << 8) | ((y & 0x38) << 2));
+                const uint8_t *attr = scr + 6144 + (y >> 3) * 32;
+                for (int cx = 0; cx < 32; cx++) {
+                    uint8_t a = attr[cx], bits = row[cx];
+                    uint8_t level = (a & 0x40) ? 0xFF : 0xD7;            // BRIGHT
+                    for (int b = 0; b < 8; b++) {
+                        uint8_t c = (bits & (0x80 >> b)) ? (a & 7) : ((a >> 3) & 7);   // ink : paper
+                        uint8_t *p = rgb + ((size_t)y * 256 + cx * 8 + b) * 3;
+                        p[0] = (c & 2) ? level : 0;   // red
+                        p[1] = (c & 4) ? level : 0;   // green
+                        p[2] = (c & 1) ? level : 0;   // blue
+                    }
+                }
+            }
+            img = make_scaled_avg(rgb, 256, 192, max_w, max_h);
+            free(rgb);
+        }
+    }
+    free(scr);
+    fclose(f);
+    if (img) ESP_LOGI(TAG, "%s: loading screen from tape -> %dx%d", path, img->header.w, img->header.h);
+    return img;
+}
+
 void cover_free(lv_img_dsc_t *img)
 {
     if (!img) return;
