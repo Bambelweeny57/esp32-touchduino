@@ -178,7 +178,7 @@ static void show_cover_image(lv_img_dsc_t *img)
 // ---------------------------------------------------------------------------
 // Worker task (core 0): directory scans and cover decoding
 
-enum JobType { JOB_SCAN, JOB_COVER };
+enum JobType { JOB_SCAN, JOB_COVER, JOB_REMOUNT };
 struct Job {
     JobType type;
     char path[256];      // directory for SCAN, file (or dir) for COVER
@@ -305,6 +305,20 @@ static void worker_task(void *arg)
         if (j.type == JOB_SCAN) {
             if (!sd_is_mounted()) sd_mount();
             do_scan(j);
+        } else if (j.type == JOB_REMOUNT) {
+            // Stop playback so no file is open on the card, then remount
+            tape_status_t st;
+            tape_get_status(&st);
+            if (st.state != TAPE_STOPPED) {
+                tape_stop();
+                for (int i = 0; i < 40; i++) {      // up to ~1 s
+                    vTaskDelay(pdMS_TO_TICKS(25));
+                    tape_get_status(&st);
+                    if (st.state == TAPE_STOPPED) break;
+                }
+            }
+            sd_remount();
+            do_scan(j);    // falls back to the card root if the folder has gone
         } else {
             uint32_t seq = (uint32_t)j.select;
             // Drop stale cover jobs if newer ones are queued
@@ -699,7 +713,15 @@ static void build_settings(void)
 // Main screen
 
 static void back_cb(lv_event_t *e) { go_parent(); }
-static void refresh_cb(lv_event_t *e) { enter_dir(sd_is_mounted() ? s_dir : std::string(SD_MOUNT)); }
+static void refresh_cb(lv_event_t *e)
+{
+    // Remount the card (handles a card swap), then rescan the current folder
+    lv_label_set_text(lbl_path, "Reading SD card...");
+    Job j = {};
+    j.type = JOB_REMOUNT;
+    strncpy(j.path, s_dir.c_str(), sizeof(j.path) - 1);
+    xQueueSend(s_jobs, &j, 0);
+}
 
 static void build_main(void)
 {
