@@ -10,7 +10,7 @@ It runs on the Guition **JC3248W535** board:
 - microSD slot
 - built-in speaker amplifier
 
-![ESP32-Touchduino LCD Interface](images/lcd-preview.jpg)
+<img src="images/lcd-preview.jpg" alt="ESP32-Touchduino LCD Interface" width="400">
 
 > **Status:** early, but working. The firmware builds, boots, mounts the SD card and drives the display and touch. Playback through the speaker and into real machines is being tested now.
 
