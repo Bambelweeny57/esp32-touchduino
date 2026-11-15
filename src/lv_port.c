@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <string.h>
+#include <stdio.h>
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_err.h"
@@ -56,6 +58,12 @@ typedef struct {
     lv_disp_rot_t             sw_rotate;        /* Panel software rotation mask */
 
     lvgl_port_wait_cb         draw_wait_cb;     /* Callback function for drawing */
+
+    /* TouchDuino: shadow frame buffer (native orientation, PSRAM). The AXS15231B
+     * in QSPI mode can only be written as a whole frame from row 0, so LVGL draws
+     * just the dirty areas into a small internal buffer, the flush rotates them
+     * into this shadow, and the last flush of a refresh streams the whole shadow. */
+    lv_color_t                *shadow_fb;
 } lvgl_port_display_ctx_t;
 
 #ifdef ESP_LVGL_PORT_TOUCH_COMPONENT
@@ -195,6 +203,7 @@ lv_disp_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
     disp_ctx->trans_size = disp_cfg->trans_size;
     disp_ctx->sw_rotate = disp_cfg->sw_rotate;
     disp_ctx->draw_wait_cb = disp_cfg->draw_wait_cb;
+    disp_ctx->shadow_fb = NULL;
 
     uint32_t buff_caps = MALLOC_CAP_DEFAULT;
     if (disp_cfg->flags.buff_dma) {
@@ -203,9 +212,19 @@ lv_disp_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
         buff_caps = MALLOC_CAP_SPIRAM;
     }
 
+    /* TouchDuino: shadow-buffer mode for 90 degree rotation (see shadow_fb) */
+    uint32_t draw_buf_px = disp_cfg->buffer_size;
+    if (disp_ctx->sw_rotate == LV_DISP_ROT_90 && disp_ctx->trans_size) {
+        disp_ctx->shadow_fb = heap_caps_calloc(disp_cfg->hres * disp_cfg->vres, sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+        if (disp_ctx->shadow_fb) {
+            draw_buf_px = disp_cfg->hres * 40;                 /* 40 lines, internal RAM: fast to draw into */
+            buff_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        }
+    }
+
     /* alloc draw buffers used by LVGL */
     /* it's recommended to choose the size of the draw buffer(s) to be at least 1/10 screen sized */
-    buf1 = heap_caps_malloc(disp_cfg->buffer_size * sizeof(lv_color_t), buff_caps);
+    buf1 = heap_caps_malloc(draw_buf_px * sizeof(lv_color_t), buff_caps);
     ESP_GOTO_ON_FALSE(buf1, ESP_ERR_NO_MEM, err, TAG, "Not enough memory for LVGL buffer (buf1) allocation!");
 
     if (disp_ctx->trans_size) {
@@ -229,7 +248,7 @@ lv_disp_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
     ESP_GOTO_ON_FALSE(disp_buf, ESP_ERR_NO_MEM, err, TAG, "Not enough memory for LVGL display buffer allocation!");
 
     /* initialize LVGL draw buffers */
-    lv_disp_draw_buf_init(disp_buf, buf1, NULL, disp_cfg->buffer_size);
+    lv_disp_draw_buf_init(disp_buf, buf1, NULL, draw_buf_px);
 
     ESP_LOGD(TAG, "Register display driver to LVGL");
     lv_disp_drv_init(&disp_ctx->disp_drv);
@@ -239,8 +258,10 @@ lv_disp_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
 
     disp_ctx->disp_drv.draw_buf = disp_buf;
     disp_ctx->disp_drv.user_data = disp_ctx;
-    /* Force full-screen redraw to avoid display flicker/tearing on this panel. */
-    disp_ctx->disp_drv.full_refresh = 1;
+    /* Force full-screen redraw to avoid display flicker/tearing on this panel,
+     * unless the shadow buffer is in use (then only dirty areas are redrawn). */
+    disp_ctx->disp_drv.full_refresh = disp_ctx->shadow_fb ? 0 : 1;
+    ESP_LOGI(TAG, "display: %s", disp_ctx->shadow_fb ? "shadow frame buffer (partial redraw)" : "full refresh");
 
 #if LVGL_PORT_HANDLE_FLUSH_READY
     /* Register done callback */
@@ -360,6 +381,50 @@ void lvgl_port_unlock(void)
     xSemaphoreGiveRecursive(lvgl_port_ctx.lvgl_mux);
 }
 
+bool lvgl_port_save_screenshot(const char *path)
+{
+    lv_disp_t *disp = lv_disp_get_default();
+    lvgl_port_display_ctx_t *ctx = disp ? (lvgl_port_display_ctx_t *)disp->driver->user_data : NULL;
+    if (!ctx || !ctx->shadow_fb) {
+        return false;
+    }
+    const int W = disp->driver->hor_res;      /* landscape width  (480) = native height */
+    const int H = disp->driver->ver_res;      /* landscape height (320) = native width  */
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "screenshot: cannot create %s", path);
+        return false;
+    }
+    /* 24-bit BMP, rows bottom-up, BGR */
+    const uint32_t row_bytes = (uint32_t)W * 3;           /* 1440: already a multiple of 4 */
+    const uint32_t img_bytes = row_bytes * H;
+    uint8_t hdr[54] = { 'B', 'M' };
+    uint32_t v;
+    v = 54 + img_bytes; memcpy(hdr + 2, &v, 4);
+    v = 54;             memcpy(hdr + 10, &v, 4);
+    v = 40;             memcpy(hdr + 14, &v, 4);
+    v = W;              memcpy(hdr + 18, &v, 4);
+    v = H;              memcpy(hdr + 22, &v, 4);
+    hdr[26] = 1;        hdr[28] = 24;
+    v = img_bytes;      memcpy(hdr + 34, &v, 4);
+    fwrite(hdr, 1, sizeof(hdr), f);
+
+    static uint8_t row[480 * 3];
+    for (int ly = H - 1; ly >= 0; ly--) {
+        for (int lx = 0; lx < W; lx++) {
+            /* logical (lx, ly) is native (nx = H-1-ly, ny = lx) in the shadow */
+            lv_color32_t c = { .full = lv_color_to32(ctx->shadow_fb[lx * H + (H - 1 - ly)]) };
+            row[lx * 3 + 0] = c.ch.blue;
+            row[lx * 3 + 1] = c.ch.green;
+            row[lx * 3 + 2] = c.ch.red;
+        }
+        fwrite(row, 1, row_bytes, f);
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "screenshot saved to %s", path);
+    return true;
+}
+
 void lvgl_port_flush_ready(lv_disp_t *disp)
 {
     assert(disp);
@@ -426,11 +491,59 @@ static bool lvgl_port_flush_ready_callback(esp_lcd_panel_io_handle_t panel_io, e
 }
 #endif
 
+/* TouchDuino: copy a dirty area (logical landscape) into the native-orientation
+ * shadow, rotating 90 degrees; on the last area of a refresh, stream the whole
+ * shadow to the panel from row 0 in trans_size chunks (double-buffered DMA). */
+static void lvgl_port_shadow_flush(lvgl_port_display_ctx_t *disp_ctx, lv_disp_drv_t *drv,
+                                   const lv_area_t *area, const lv_color_t *color_map)
+{
+    const int nw = drv->ver_res;           /* native width  (320) */
+    const int nh = drv->hor_res;           /* native height (480) */
+    const int w = area->x2 - area->x1 + 1;
+    const int h = area->y2 - area->y1 + 1;
+    lv_color_t *fb = disp_ctx->shadow_fb;
+
+    /* logical (lx, ly) -> native (nx = nw-1-ly, ny = lx); write native rows contiguously */
+    for (int lx = area->x1; lx <= area->x2; lx++) {
+        lv_color_t *dst = fb + lx * nw + (nw - 1 - area->y1);
+        const lv_color_t *src = color_map + (lx - area->x1);
+        for (int ly = 0; ly < h; ly++) {
+            *(dst - ly) = src[ly * w];
+        }
+    }
+
+    if (!lv_disp_flush_is_last(drv)) {
+        return;
+    }
+
+    const int rows_per_chunk = disp_ctx->trans_size / nw;
+    disp_ctx->trans_act = disp_ctx->trans_buf_1;
+    for (int row = 0, i = 0; row < nh; row += rows_per_chunk, i++) {
+        int rows = (nh - row) < rows_per_chunk ? (nh - row) : rows_per_chunk;
+        disp_ctx->trans_act = (disp_ctx->trans_act == disp_ctx->trans_buf_1) ? disp_ctx->trans_buf_2 : disp_ctx->trans_buf_1;
+        memcpy(disp_ctx->trans_act, fb + row * nw, (size_t)rows * nw * sizeof(lv_color_t));
+        if (0 == i) {
+            if (disp_ctx->draw_wait_cb) {
+                disp_ctx->draw_wait_cb(disp_ctx->panel_handle->user_data);
+            }
+            xSemaphoreGive(disp_ctx->trans_done_sem);
+        }
+        xSemaphoreTake(disp_ctx->trans_done_sem, portMAX_DELAY);
+        esp_lcd_panel_draw_bitmap(disp_ctx->panel_handle, 0, row, nw, row + rows, disp_ctx->trans_act);
+    }
+}
+
 static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
     assert(drv != NULL);
     lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)drv->user_data;
     assert(disp_ctx != NULL);
+
+    if (disp_ctx->shadow_fb) {
+        lvgl_port_shadow_flush(disp_ctx, drv, area, color_map);
+        lv_disp_flush_ready(drv);
+        return;
+    }
 
     const int x_start = area->x1;
     const int x_end = area->x2;

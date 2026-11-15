@@ -14,6 +14,13 @@ typedef enum {
     TAPE_PAUSED,
 } tape_state_t;
 
+enum {
+    TAPE_PHASE_IDLE = 0,   // stopped or paused
+    TAPE_PHASE_PILOT,      // pilot tone / sync pulses
+    TAPE_PHASE_DATA,       // data bits
+    TAPE_PHASE_GAP,        // pause between blocks
+};
+
 typedef struct {
     tape_state_t state;
     uint32_t pos;          // bytes consumed
@@ -22,6 +29,7 @@ typedef struct {
     int block_count;       // number of navigable blocks (0 = format has no blocks)
     uint8_t block_id;      // TZX block ID being processed
     bool motor_on;         // REM line state (true = computer asks for play)
+    uint8_t phase;         // TAPE_PHASE_* (what the engine is generating; leads the audio by up to one buffer)
     char msg[48];          // last engine message
     char file[128];        // basename being played
 } tape_status_t;

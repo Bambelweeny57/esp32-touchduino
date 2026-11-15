@@ -43,6 +43,7 @@ static char s_msg[48];
 
 void engine_message(const char *msg)
 {
+    if (strcmp(s_msg, msg) != 0) ESP_LOGI("engine", "msg: %s (pos %lu)", msg, (unsigned long)bytesRead);
     strncpy(s_msg, msg, sizeof(s_msg) - 1);
     s_msg[sizeof(s_msg) - 1] = 0;
 }
@@ -162,7 +163,9 @@ static void build_block_table(const char *path, const char *ext)
     if (tzx) { s_kind = BlockKind::TZX; scan_tzx(f, filesize); }
     else     { s_kind = BlockKind::TAP; s_jtap = currentID == BLOCKID::JTAP; scan_tap(f, filesize); }
     fclose(f);
-    ESP_LOGI(TAG, "%u navigable blocks", (unsigned)s_blocks.size());
+    ESP_LOGI(TAG, "%u navigable blocks (file %lu bytes)", (unsigned)s_blocks.size(), (unsigned long)filesize);
+    for (size_t i = 0; i < s_blocks.size(); i++)
+        ESP_LOGI(TAG, "  blk %u: id 0x%02x @ %lu", (unsigned)(i + 1), s_blocks[i].id, (unsigned long)s_blocks[i].offset);
 }
 
 static int current_block_index(void)
@@ -281,6 +284,17 @@ static void handle(const Cmd &c)
 
 static void update_status(void)
 {
+    // Diagnostics: log block ID / state transitions (low rate, engine task only)
+    static uint8_t last_id = 0xFF, last_state = 0xFF;
+    uint8_t state_now = start != 1 ? 0 : (pauseOn ? 2 : 1);
+    if (currentID != last_id || state_now != last_state) {
+        ESP_LOGI(TAG, "%s id 0x%02x task %d blk %d @ %lu/%lu",
+                 state_now == 0 ? "STOP" : state_now == 2 ? "PAUSE" : "PLAY", currentID, (int)currentBlockTask,
+                 start == 1 ? current_block_index() + 1 : 0, (unsigned long)bytesRead, (unsigned long)filesize);
+        last_id = currentID;
+        last_state = state_now;
+    }
+
     tape_status_t st = {};
     st.state = start != 1 ? TAPE_STOPPED : (pauseOn ? TAPE_PAUSED : TAPE_PLAYING);
     st.pos = bytesRead;
@@ -289,8 +303,25 @@ static void update_status(void)
     st.block_count = (int)s_blocks.size();
     st.block_id = currentID;
     st.motor_on = motor_line_on();
-    strncpy(st.msg, s_msg, sizeof(st.msg) - 1);
-    strncpy(st.file, fileName, sizeof(st.file) - 1);
+    st.phase = TAPE_PHASE_IDLE;
+    if (start == 1 && !pauseOn) {
+        if (currentID == BLOCKID::IDPAUSE || currentBlockTask == BLOCKTASK::PAUSE) {
+            st.phase = TAPE_PHASE_GAP;
+        } else {
+            switch (currentBlockTask) {
+                case BLOCKTASK::PILOT:
+                case BLOCKTASK::SYNC1:
+                case BLOCKTASK::SYNC2:
+                    st.phase = TAPE_PHASE_PILOT;
+                    break;
+                default:
+                    st.phase = TAPE_PHASE_DATA;
+                    break;
+            }
+        }
+    }
+    snprintf(st.msg, sizeof(st.msg), "%s", s_msg);
+    snprintf(st.file, sizeof(st.file), "%s", fileName);
     noInterrupts();
     memcpy((void *)&s_status, &st, sizeof(st));
     interrupts();

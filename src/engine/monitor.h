@@ -24,7 +24,8 @@ extern volatile bool g_mon_enabled;
 // Called from the tape ISR on every timer tick: records level changes
 __attribute__((always_inline)) static inline void monitor_isr_record(uint32_t t, uint8_t level)
 {
-    if (level == g_mon_last_level || !g_mon_enabled) return;
+    // Always recorded (the UI border reads it too); the speaker task drains it
+    if (level == g_mon_last_level) return;
     g_mon_last_level = level;
     uint32_t h = g_mon_head;
     if (h - g_mon_tail >= MON_RING_SIZE) return;   // full: drop

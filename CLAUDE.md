@@ -66,3 +66,24 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 
 ## Testing without hardware
 - Serial log at 115200 (`pio.exe device monitor -p COM9`); engine logs `play ...`, `N navigable blocks`, `jump to block`.
+
+## Display performance (2026-11-15)
+- AXS15231B in QSPI mode has no RASET: every update must stream the whole frame from row 0. The base project therefore used `full_refresh`, which re-rendered all 480x320 pixels into PSRAM for ANY change (~80 ms/frame).
+- `src/lv_port.c` now uses a **shadow frame buffer** (native 320x480, PSRAM) when rotated 90 degrees: LVGL redraws only dirty areas into a 40-line internal buffer, the flush rotates them into the shadow, and the last flush of a refresh streams the whole shadow (TE sync + double-buffered DMA). Animated border: ~32 ms/frame, most of it waiting on DMA/TE, not CPU.
+- Built with `CONFIG_COMPILER_OPTIMIZATION_PERF` (-O2); this made GCC flag a strncpy truncation as an error in engine.cpp (now snprintf).
+- UI rules: only set label text when it changed; animations only invalidate while active. Scrolling labels (header path, preview filename, 18 px/s) are OK now that only their area redraws (~20 small frames/s at idle).
+- `ui.cpp`: `UI_PERF_LOG 1` logs render time every ~5 s of activity; `UI_ANIM_SELFTEST 1` forces the loading stripes for measuring.
+
+## UI look
+- "Glass" theme = opaque vertical gradients + 1 px translucent borders (no large alpha areas, no shadows: both are expensive here).
+- Preview is a "TV": bezel > border frame (TV_BORDER 8 px) > screen 144x92. Border colour is the system's (Spectrum light grey, CPC blue, C64 light blue...).
+- Loading border while playing is the **live signal** (`draw_live`): reads the last 20 ms of edges from `g_mon_ring` (recorded by the ISR for the speaker, now always recorded), ~35 ms behind to line up with the speaker, one row per ~185 us. Spectrum: red/cyan for pulses >= 540 us (pilot), blue/yellow for shorter (data); CPC/C64: a palette colour per pulse. Gaps > 3 ms = silence = system border colour (Spectrum black). Other formats (BBC, MSX, Oric, Jupiter...) keep a static border. `tape_status_t.phase` is still reported but no longer used by the UI.
+- Image fallback chain: game.jpg/png -> folder.jpg/png up the tree -> system badge from folder name -> default placeholder (black screen, cycling Spectrum-style loading border).
+
+## Tools and troubleshooting (2026-11-15)
+- **Screenshot:** long-press the header path -> `lvgl_port_save_screenshot()` writes `/sdcard/screenshot.bmp` (480x320, 24-bit) from the shadow frame buffer. `images/lcd-preview.jpg` is a real screenshot placed in a device frame (render script was a one-off Pillow job).
+  - Don't stream screenshots over USB: the USB-Serial-JTAG is only the *secondary* console (drops data), and the driver path ran at ~1 KB/s and froze the UI.
+- **Upload fails with "No serial data received" after "Stub running":** the USB link is in a bad state; replug the board, or flash with the ROM loader:
+  `~/.platformio/penv/Scripts/python.exe ~/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port COM9 --baud 115200 --no-stub write_flash 0x10000 .pio/build/jc3248w535/firmware.bin`
+- **Engine diagnostics:** the engine logs the block table at play and every block-ID / play-pause-stop change (`engine:` lines). Used to show that DECATHLN.TAP is two full loads (Day 1 + Day 2): TAP files have no stop markers, so playback continues into Day 2 (user chose not to add a TAP auto-pause heuristic).
+- Pillow is not in the PlatformIO penv; install into a scratch folder with `pip install --target` if needed.
