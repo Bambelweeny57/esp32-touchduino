@@ -34,6 +34,8 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "ff.h"
 
 #include "ui.h"
 #include "cover.h"
@@ -87,10 +89,14 @@ static lv_obj_t *lbl_path, *lbl_rem, *list;
 static lv_obj_t *tv_frame, *tv_screen, *img_cover, *badge, *badge_lbl, *badge_stripes[4], *placeholder_lbl;
 static lv_obj_t *lbl_name, *lbl_info;
 static lv_obj_t *bar_prog, *lbl_status, *lbl_play;
-static lv_obj_t *bm_baud, *sw_motor, *sw_pol, *sw_skip2a, *sw_spk, *sl_vol, *lbl_vol;
+static lv_obj_t *bm_baud, *sw_motor, *sw_pol, *sw_skip2a, *sw_gaps, *sw_spk, *sl_vol, *lbl_vol;
 
 // Styles
-static lv_style_t st_screen, st_glass, st_btn, st_item, st_item_chk, st_item_pr;
+static lv_style_t st_screen, st_glass, st_btn, st_item, st_item_chk, st_item_pr, st_item_dis, st_btn_dis;
+
+// Browsing is locked while a tape is playing or paused (press stop to move on)
+static bool s_browse_locked = false;
+static lv_obj_t *btn_back, *btn_refresh, *btn_prev, *btn_next;
 static lv_style_t st_bar_bg, st_bar_ind, st_bezel;
 
 // ---------------------------------------------------------------------------
@@ -509,10 +515,32 @@ static volatile uint32_t s_cover_seq = 0;   // newest cover request wins
 static void rebuild_list(void);
 static void update_preview(void);
 
+// Read a folder with FatFs directly: f_readdir returns name, size and type in
+// one pass. (readdir + stat per file made big folders O(n^2): each stat
+// searches the whole directory again.)
+static bool read_dir(const char *vfs_path, std::vector<Entry> &v)
+{
+    const char *drv = sd_fatfs_drive();
+    if (!drv || strncmp(vfs_path, SD_MOUNT, strlen(SD_MOUNT)) != 0) return false;
+    std::string ff_path = std::string(drv) + (vfs_path[strlen(SD_MOUNT)] ? vfs_path + strlen(SD_MOUNT) : "/");
+    static FF_DIR dir;
+    static FILINFO fno;
+    if (f_opendir(&dir, ff_path.c_str()) != FR_OK) return false;
+    while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0]) {
+        if (fno.fname[0] == '.' || (fno.fattrib & (AM_HID | AM_SYS))) continue;
+        bool is_dir = (fno.fattrib & AM_DIR) != 0;
+        if (!is_dir && !is_tape_ext(ext_of(fno.fname))) continue;
+        v.push_back({ fno.fname, is_dir, (uint32_t)fno.fsize });
+    }
+    f_closedir(&dir);
+    return true;
+}
+
 static void do_scan(const Job &j)
 {
     std::vector<Entry> v;
-    DIR *d = opendir(j.path);
+    int64_t t0 = esp_timer_get_time();
+    bool d = read_dir(j.path, v);
     if (!d && sd_is_mounted() && strcmp(j.path, SD_MOUNT) != 0) {
         // remembered folder has gone: fall back to the card root
         Job root = {};
@@ -521,28 +549,11 @@ static void do_scan(const Job &j)
         do_scan(root);
         return;
     }
-    if (d) {
-        struct dirent *de;
-        while ((de = readdir(d)) != NULL) {
-            if (de->d_name[0] == '.') continue;
-            std::string name = de->d_name;
-            bool dir = de->d_type == DT_DIR;
-            if (!dir && !is_tape_ext(ext_of(name))) continue;
-            if (!strcasecmp(name.c_str(), "System Volume Information")) continue;
-            uint32_t size = 0;
-            if (!dir) {
-                struct stat st;
-                if (stat(join(j.path, name).c_str(), &st) == 0) size = (uint32_t)st.st_size;
-            }
-            v.push_back({ name, dir, size });
-        }
-        closedir(d);
-    }
     std::sort(v.begin(), v.end(), [](const Entry &a, const Entry &b) {
         if (a.dir != b.dir) return a.dir;
         return strcasecmp(a.name.c_str(), b.name.c_str()) < 0;
     });
-    ESP_LOGI(TAG, "scan %s: %u entries%s", j.path, (unsigned)v.size(), d ? "" : " (open failed)");
+    int64_t t1 = esp_timer_get_time();
 
     bsp_display_lock(0);
     s_entries.swap(v);
@@ -561,6 +572,8 @@ static void do_scan(const Job &j)
     rebuild_list();
     update_preview();
     bsp_display_unlock();
+    ESP_LOGI(TAG, "scan %s: %u entries%s, read %d ms, list %d ms", j.path, (unsigned)s_entries.size(),
+             d ? "" : " (open failed)", (int)((t1 - t0) / 1000), (int)((esp_timer_get_time() - t1) / 1000));
     if (d) settings_save_dir(j.path);
 }
 
@@ -675,6 +688,8 @@ static void add_item(const char *icon, const char *text, intptr_t tag, bool sele
     lv_obj_add_style(b, &st_item, 0);
     lv_obj_add_style(b, &st_item_chk, LV_STATE_CHECKED);
     lv_obj_add_style(b, &st_item_pr, LV_STATE_PRESSED);
+    lv_obj_add_style(b, &st_item_dis, LV_STATE_DISABLED);
+    if (s_browse_locked) lv_obj_add_state(b, LV_STATE_DISABLED);
     lv_obj_set_height(b, 44);
     lv_obj_set_style_text_font(b, &lv_font_montserrat_16, 0);
     lv_obj_add_event_cb(b, list_item_cb, LV_EVENT_CLICKED, (void *)tag);
@@ -713,6 +728,25 @@ static void rebuild_list(void)
     if (sel_btn) lv_obj_scroll_to_view(sel_btn, LV_ANIM_OFF);
 }
 
+// Lock or unlock browsing (list, back, refresh, prev/next file) while a tape plays
+static void set_browse_locked(bool lock)
+{
+    if (lock == s_browse_locked) return;
+    s_browse_locked = lock;
+    uint32_t n = lv_obj_get_child_cnt(list);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *c = lv_obj_get_child(list, i);
+        if (lock) lv_obj_add_state(c, LV_STATE_DISABLED);
+        else lv_obj_clear_state(c, LV_STATE_DISABLED);
+    }
+    if (lock) lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    else lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    for (lv_obj_t *b : { btn_back, btn_refresh, btn_prev, btn_next }) {
+        if (lock) lv_obj_add_state(b, LV_STATE_DISABLED);
+        else lv_obj_clear_state(b, LV_STATE_DISABLED);
+    }
+}
+
 static void mark_selection(void)
 {
     uint32_t n = lv_obj_get_child_cnt(list);
@@ -728,24 +762,47 @@ static void mark_selection(void)
     }
 }
 
+static uint32_t s_playing_size = 0;
+static std::string s_preview_path;     // what the preview currently shows
+
+static void set_preview_file(const std::string &name, uint32_t size)
+{
+    lv_label_set_text(lbl_name, name.c_str());
+    const char *fmt = format_name(ext_of(name));
+    if (size >= 10240) lv_label_set_text_fmt(lbl_info, "%s  " LV_SYMBOL_BULLET "  %u KB", fmt, (unsigned)(size / 1024));
+    else lv_label_set_text_fmt(lbl_info, "%s  " LV_SYMBOL_BULLET "  %u bytes", fmt, (unsigned)size);
+}
+
+static void preview_cover(const std::string &path)
+{
+    if (path == s_preview_path) return;    // already showing it: no flicker
+    s_preview_path = path;
+    request_cover(path);
+}
+
 static void update_preview(void)
 {
+    // While a tape is playing or paused the preview stays on that tape, so
+    // browsing other files doesn't show their details as if they were playing.
+    if (s_last_state != TAPE_STOPPED && !s_playing.empty()) {
+        set_preview_file(s_playing.substr(s_playing.rfind('/') + 1), s_playing_size);
+        preview_cover(s_playing);
+        return;
+    }
     if (s_sel < 0 || s_sel >= (int)s_entries.size()) {
         lv_label_set_text(lbl_name, s_dir == SD_MOUNT ? "TouchDuino" : s_dir.substr(s_dir.rfind('/') + 1).c_str());
         lv_label_set_text_fmt(lbl_info, "%u items", (unsigned)s_entries.size());
-        request_cover(s_dir);
+        preview_cover(s_dir);
         return;
     }
     const Entry &en = s_entries[s_sel];
-    lv_label_set_text(lbl_name, en.name.c_str());
     if (en.dir) {
+        lv_label_set_text(lbl_name, en.name.c_str());
         lv_label_set_text(lbl_info, "Folder");
     } else {
-        const char *fmt = format_name(ext_of(en.name));
-        if (en.size >= 10240) lv_label_set_text_fmt(lbl_info, "%s  " LV_SYMBOL_BULLET "  %u KB", fmt, (unsigned)(en.size / 1024));
-        else lv_label_set_text_fmt(lbl_info, "%s  " LV_SYMBOL_BULLET "  %u bytes", fmt, (unsigned)en.size);
+        set_preview_file(en.name, en.size);
     }
-    request_cover(join(s_dir, en.name));
+    preview_cover(join(s_dir, en.name));
 }
 
 static void select_index(int idx)
@@ -779,6 +836,7 @@ static void play_selected(void)
         if (s_sel < 0 || s_entries[s_sel].dir) return;
     }
     s_playing = join(s_dir, s_entries[s_sel].name);
+    s_playing_size = s_entries[s_sel].size;
     System psys = frame_system_for(s_playing, false);
     s_play_kind = SYS[psys].kind;
     s_silent_col = SYS[psys].border;
@@ -787,6 +845,7 @@ static void play_selected(void)
 
 static void list_item_cb(lv_event_t *e)
 {
+    if (s_browse_locked) return;     // stop the tape first
     intptr_t tag = (intptr_t)lv_event_get_user_data(e);
     if (tag == TAG_PARENT) { go_parent(); return; }
     if (tag == TAG_PREV_PAGE) { s_page--; rebuild_list(); return; }
@@ -800,7 +859,7 @@ static void list_item_cb(lv_event_t *e)
 
 static void step_file(int dir)
 {
-    if (s_entries.empty()) return;
+    if (s_browse_locked || s_entries.empty()) return;
     int n = (int)s_entries.size();
     int i = s_sel;
     for (int k = 0; k < n; k++) {
@@ -869,6 +928,16 @@ static void init_styles(void)
     lv_style_set_border_opa(&st_item_chk, LV_OPA_60);
     lv_style_set_text_color(&st_item_chk, lv_color_hex(0xffffff));
 
+    // Locked (tape playing): dim text, and greyed-out buttons
+    lv_style_init(&st_item_dis);
+    lv_style_set_text_color(&st_item_dis, lv_color_hex(0x5a6475));
+
+    lv_style_init(&st_btn_dis);
+    lv_style_set_bg_color(&st_btn_dis, lv_color_hex(0x2a3040));
+    lv_style_set_bg_grad_color(&st_btn_dis, lv_color_hex(0x1b202b));
+    lv_style_set_text_color(&st_btn_dis, lv_color_hex(0x5a6475));
+    lv_style_set_border_opa(&st_btn_dis, LV_OPA_10);
+
     lv_style_init(&st_item_pr);
     lv_style_set_bg_opa(&st_item_pr, LV_OPA_COVER);
     lv_style_set_bg_color(&st_item_pr, lv_color_hex(0x2c3d5e));
@@ -917,6 +986,7 @@ static void style_btn(lv_obj_t *b, uint32_t top, uint32_t bottom)
     lv_obj_add_style(b, &st_btn, 0);
     lv_obj_set_style_bg_color(b, lv_color_hex(top), 0);
     lv_obj_set_style_bg_grad_color(b, lv_color_hex(bottom), 0);
+    lv_obj_add_style(b, &st_btn_dis, LV_STATE_DISABLED);
 }
 
 static lv_obj_t *small_btn(lv_obj_t *parent, const char *sym, lv_event_cb_t cb)
@@ -977,7 +1047,12 @@ static void status_timer_cb(lv_timer_t *t)
 
     if (st.state != s_last_state) {
         lv_label_set_text(lbl_play, st.state == TAPE_PLAYING ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+        bool stop_changed = (st.state == TAPE_STOPPED) != (s_last_state == TAPE_STOPPED);
         s_last_state = st.state;
+        if (stop_changed) {
+            set_browse_locked(st.state != TAPE_STOPPED);
+            update_preview();   // lock to the playing tape / back to the selection
+        }
     }
 
     int pct = st.size ? (int)((uint64_t)st.pos * 100 / st.size) : 0;
@@ -1042,6 +1117,7 @@ static void settings_from_widgets(void)
     s_settings.motor_auto = lv_obj_has_state(sw_motor, LV_STATE_CHECKED);
     s_settings.polarity = lv_obj_has_state(sw_pol, LV_STATE_CHECKED);
     s_settings.skip2a = lv_obj_has_state(sw_skip2a, LV_STATE_CHECKED);
+    s_settings.short_gaps = lv_obj_has_state(sw_gaps, LV_STATE_CHECKED);
     s_settings.speaker = lv_obj_has_state(sw_spk, LV_STATE_CHECKED);
     s_settings.volume = lv_slider_get_value(sl_vol);
 }
@@ -1059,6 +1135,7 @@ static void settings_to_widgets(void)
     if (s_settings.motor_auto) lv_obj_add_state(sw_motor, LV_STATE_CHECKED); else lv_obj_clear_state(sw_motor, LV_STATE_CHECKED);
     if (s_settings.polarity) lv_obj_add_state(sw_pol, LV_STATE_CHECKED); else lv_obj_clear_state(sw_pol, LV_STATE_CHECKED);
     if (s_settings.skip2a) lv_obj_add_state(sw_skip2a, LV_STATE_CHECKED); else lv_obj_clear_state(sw_skip2a, LV_STATE_CHECKED);
+    if (s_settings.short_gaps) lv_obj_add_state(sw_gaps, LV_STATE_CHECKED); else lv_obj_clear_state(sw_gaps, LV_STATE_CHECKED);
     if (s_settings.speaker) lv_obj_add_state(sw_spk, LV_STATE_CHECKED); else lv_obj_clear_state(sw_spk, LV_STATE_CHECKED);
     lv_slider_set_value(sl_vol, s_settings.volume, LV_ANIM_OFF);
     lv_label_set_text_fmt(lbl_vol, "%d%%", s_settings.volume);
@@ -1183,15 +1260,17 @@ static void build_settings(void)
     lv_obj_set_height(r, 70);
 
     sw_pol = settings_switch(body, "Polarity / TSX accel / UEF parity", "MaxDuino multi-purpose flag");
+    sw_gaps = settings_switch(body, "Shorten long gaps", "Gaps over 5 s play as 5 s. Turn off if a game fails");
     sw_skip2a = settings_switch(body, "Skip TZX block 2A", "Ignore 'stop tape if 48K' blocks");
 }
 
 // ---------------------------------------------------------------------------
 // Main screen
 
-static void back_cb(lv_event_t *e) { go_parent(); }
+static void back_cb(lv_event_t *e) { if (!s_browse_locked) go_parent(); }
 static void refresh_cb(lv_event_t *e)
 {
+    if (s_browse_locked) return;
     // Remount the card (handles a card swap), then rescan the current folder
     lv_label_set_text(lbl_path, "Reading SD card...");
     Job j = {};
@@ -1209,7 +1288,7 @@ static void build_main(void)
     // Header
     lv_obj_t *hdr = glass_panel(scr_main, 4, 4, 472, 42);
     lv_obj_set_style_pad_all(hdr, 3, 0);
-    lv_obj_t *back = small_btn(hdr, LV_SYMBOL_LEFT, back_cb);
+    lv_obj_t *back = btn_back = small_btn(hdr, LV_SYMBOL_LEFT, back_cb);
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
 
     lbl_path = lv_label_create(hdr);
@@ -1234,7 +1313,7 @@ static void build_main(void)
     lv_obj_align(lbl_rem, LV_ALIGN_RIGHT_MID, -104, 0);
     lv_label_set_text(lbl_rem, "");
 
-    lv_obj_t *refresh = small_btn(hdr, LV_SYMBOL_REFRESH, refresh_cb);
+    lv_obj_t *refresh = btn_refresh = small_btn(hdr, LV_SYMBOL_REFRESH, refresh_cb);
     lv_obj_align(refresh, LV_ALIGN_RIGHT_MID, -52, 0);
     lv_obj_t *gear = small_btn(hdr, LV_SYMBOL_SETTINGS, open_settings_cb);
     lv_obj_align(gear, LV_ALIGN_RIGHT_MID, 0, 0);
@@ -1347,12 +1426,12 @@ static void build_main(void)
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     const uint32_t g_top = 0x46597e, g_bot = 0x1a2438;
-    make_btn(row, LV_SYMBOL_PREV, B_PREV, g_top, g_bot);
+    btn_prev = make_btn(row, LV_SYMBOL_PREV, B_PREV, g_top, g_bot);
     make_btn(row, LV_SYMBOL_LEFT LV_SYMBOL_LEFT, B_BLK_PREV, g_top, g_bot);
     make_btn(row, LV_SYMBOL_PLAY, B_PLAY, 0x3fd27f, 0x14693a, &lbl_play);
     make_btn(row, LV_SYMBOL_STOP, B_STOP, 0xf0605a, 0x8a1f1f);
     make_btn(row, LV_SYMBOL_RIGHT LV_SYMBOL_RIGHT, B_BLK_NEXT, g_top, g_bot);
-    make_btn(row, LV_SYMBOL_NEXT, B_NEXT, g_top, g_bot);
+    btn_next = make_btn(row, LV_SYMBOL_NEXT, B_NEXT, g_top, g_bot);
 }
 
 extern "C" void ui_init(const tape_settings_t *settings, const char *start_dir)

@@ -36,7 +36,13 @@ It runs on the Guition **JC3248W535** board:
 - **Speaker:** the tape signal is mirrored to the onboard speaker, so you can hear it load. Volume is adjustable and there's a test beep.
 - **Line out:** GPIO 17 outputs the signal for a 3.5 mm jack to the computer's EAR/tape input.
 - **Motor control (REM):** in **Auto REM**, the computer's motor line on GPIO 18 pauses and resumes playback, and the header shows **REM ▶** or **REM ❚❚**. In **Force run** the line is ignored and the header shows **RUN**.
-- **Options:** speed for TSX/CAS/CDT (1200–3850 baud), MaxDuino's polarity/parity flag and "skip block 2A". Settings are kept after power-off.
+- **Options:**
+  - speed for TSX/CAS/CDT (1200–3850 baud);
+  - **Shorten long gaps** (on by default): gaps over 5 s in the file play as 5 s. TZX transfers often contain long stretches of blank tape, such as 35 s after a loading screen. Turn it off if a game ever fails to load;
+  - **Skip TZX block 2A** (on by default): ignores "stop the tape if in 48K mode" markers, which would wrongly pause 128K games;
+  - MaxDuino's polarity/parity flag.
+
+  Settings are kept after power-off.
 
 ## Hardware
 
@@ -98,10 +104,10 @@ python ~/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port CO
 1. **Prepare the card.** Format a microSD card as FAT32 (FAT16 is fine for small cards) and copy your tape files onto it. Folders are fine, for example `/Spectrum/Games/Manic Miner.tzx`. Long file names work.
    - UEF files must be uncompressed. Run `gunzip -c game.uef > game.uef.tmp` and rename the result back to `game.uef`.
 2. **Browse.** Tap a folder to open it, and ◀ (or `..`) to go back. ↻ re-reads the SD card: use it after swapping cards, since the board can't detect a card change by itself. It stops playback first.
-3. **Play.** Tap a file to select it and see its preview, then tap again or press ▶. ▶ toggles pause while playing and ■ stops.
+3. **Play.** Tap a file to select it and see its preview, then tap again or press ▶. ▶ toggles pause while playing and ■ stops. While a tape is playing or paused, browsing is locked and the preview stays on that tape: press ■ to choose another file. The status line shows **End of tape** when it finishes.
 4. **Skip blocks.** ◀◀ and ▶▶ jump between data blocks in TZX/TSX/CDT and Spectrum TAP files.
 5. **Multi-load games.** Some games load in parts, such as days, levels or sides.
-   - **TZX images** often contain "stop the tape" markers, and TouchDuino pauses there; press ▶ when the game asks.
+   - **TZX images** often contain "stop the tape" markers, and TouchDuino pauses there; press ▶ when the game asks. "Stop if 48K" markers are ignored unless you turn off **Skip TZX block 2A**.
    - **TAP files** have no such markers and play straight through. Pause after a part has loaded and resume when the game asks for the next one, as you would with a real cassette.
 6. **Options.** The ⚙ screen holds the speaker on/off switch, volume and test beep. It also has the motor mode, baud rate and the MaxDuino flags.
 7. **Screenshots.** Press and hold the folder path at the top for about a second. The current screen is saved to the card as `screenshot.bmp`, and the header shows **✓ Saved screenshot.bmp**.

@@ -87,3 +87,17 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
   `~/.platformio/penv/Scripts/python.exe ~/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port COM9 --baud 115200 --no-stub write_flash 0x10000 .pio/build/jc3248w535/firmware.bin`
 - **Engine diagnostics:** the engine logs the block table at play and every block-ID / play-pause-stop change (`engine:` lines). Used to show that DECATHLN.TAP is two full loads (Day 1 + Day 2): TAP files have no stop markers, so playback continues into Day 2 (user chose not to add a TAP auto-pause heuristic).
 - Pillow is not in the PlatformIO penv; install into a scratch folder with `pip install --target` if needed.
+
+## Playback behaviour fixes (2026-11-15)
+- **Browsing locked while playing/paused** (`set_browse_locked` in ui.cpp): list children + back/refresh/prev/next get LV_STATE_DISABLED (disabled styles `st_item_dis` / `st_btn_dis`) and callbacks early-return; the preview stays on `s_playing` until the tape stops (`update_preview`).
+- **Folder scan** uses FatFs `f_readdir` (name + size + attr in one pass) via `sd_fatfs_drive()`; `readdir` + `stat` per file was O(n^2) on FAT. Log shows `read X ms, list Y ms`.
+- **Status after stop:** `stopFile()` sets "End of tape" (or "Stopped early (block XX)") when the engine stops itself; user stops set `s_user_stop` and show "Stopped".
+- **Skip 2A on by default** (DEFAULT_SKIP2A 1, NVS migration via `cfgver` = 2): ID2A "stop if 48K" wrongly paused 128K games. ID20 pause-0 markers still pause.
+- **Long gaps:** TZX block pauses come straight from the file (DNA Warrior has a 35 s gap after its loading screen and 52 s at the end; an Android player shortens them). Option **Shorten long gaps** (default on, NVS key `gaps`) caps them at 5 s via `maxGapMs` in MaxProcessing.cpp's IDPAUSE handler.
+- Engine logs each TZX data block's gap at play (`id 0x10 @ off: N bytes, then X ms gap`) and any stop markers. Block/ID transitions are sampled every 50 ms, so short IDPAUSE states are not logged.
+
+## Next: real-machine tests (planned from 2026-11-16)
+- 3.5 mm connectors (panel-mount + socket-to-bare-wire for the prototype) arriving 2026-11-16; 2.5 mm REM panel sockets arriving Tuesday 2026-11-17.
+- Machines available: ZX Spectrum, BBC Micro, MSX, Oric Atmos (a scratch-built one, so the REM relay can be seen and heard; the MSX REM relay is audible too). The Oric and MSX are the best REM test machines.
+- Build the line-out filter from `images/line-out.png` (C2 + toward the board). Note per machine: loads / fails partway / never starts, and the file used.
+- Verified on the board so far: speaker, TAP/TZX playback, live border, card swap, browse lock, End of tape, long-gap shortening (matches an Android player; MaxDuino on a TZXduino plays the full 35 s gap).

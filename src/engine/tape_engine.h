@@ -39,6 +39,7 @@ typedef struct {
     bool motor_auto;       // true = Auto REM, false = Force run
     bool polarity;         // MaxDuino TSXCONTROLzxpolarityUEFSWITCHPARITY
     bool skip2a;           // ignore TZX ID2A "stop if 48K"
+    bool short_gaps;       // play gaps longer than 5 s as 5 s
     bool speaker;          // mirror signal to the onboard speaker
     int volume;            // 0..100
 } tape_settings_t;

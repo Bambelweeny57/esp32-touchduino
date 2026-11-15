@@ -1,8 +1,10 @@
 #include <string.h>
+#include <stdio.h>
 #include "storage.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
+#include "diskio_sdmmc.h"
 #include "driver/sdmmc_host.h"
 #include "driver/gpio.h"
 #include "nvs_flash.h"
@@ -18,6 +20,14 @@ static const char *TAG = "storage";
 static sdmmc_card_t *s_card = NULL;
 
 bool sd_is_mounted(void) { return s_card != NULL; }
+
+const char *sd_fatfs_drive(void)
+{
+    static char drv[8];
+    if (!s_card) return NULL;
+    snprintf(drv, sizeof(drv), "%d:", (int)ff_diskio_get_pdrv_card(s_card));
+    return drv;
+}
 
 // There is no card-detect line on this board, so after a card swap the old
 // mount is stale (the new card is uninitialised). Unmount and start again.
@@ -92,7 +102,8 @@ void settings_load(tape_settings_t *s, char *last_dir, int last_dir_len)
     s->baud = 3850;
     s->motor_auto = false;
     s->polarity = false;
-    s->skip2a = false;
+    s->skip2a = true;      // ignore TZX ID2A "stop if 48K": wrong for 128K games
+    s->short_gaps = true;  // gaps over 5 s play as 5 s (TZX transfers often contain long blank tape)
     s->speaker = true;
     s->volume = 40;
     if (last_dir) strncpy(last_dir, SD_MOUNT, last_dir_len);
@@ -105,6 +116,17 @@ void settings_load(tape_settings_t *s, char *last_dir, int last_dir_len)
     if (nvs_get_u8(h, "motor", &u8) == ESP_OK) s->motor_auto = u8;
     if (nvs_get_u8(h, "pol", &u8) == ESP_OK) s->polarity = u8;
     if (nvs_get_u8(h, "skip2a", &u8) == ESP_OK) s->skip2a = u8;
+    if (nvs_get_u8(h, "gaps", &u8) == ESP_OK) s->short_gaps = u8;
+    // Settings version 2: "Skip TZX block 2A" became the default. Turn it on once
+    // for settings saved by older firmware (the user can still switch it off).
+    uint8_t ver = 0;
+    nvs_get_u8(h, "cfgver", &ver);
+    if (ver < 2) {
+        s->skip2a = true;
+        nvs_set_u8(h, "skip2a", 1);
+        nvs_set_u8(h, "cfgver", 2);
+        nvs_commit(h);
+    }
     if (nvs_get_u8(h, "spk", &u8) == ESP_OK) s->speaker = u8;
     if (nvs_get_u8(h, "vol", &u8) == ESP_OK) s->volume = u8;
     if (last_dir) {
@@ -122,6 +144,7 @@ void settings_save(const tape_settings_t *s)
     nvs_set_u8(h, "motor", s->motor_auto);
     nvs_set_u8(h, "pol", s->polarity);
     nvs_set_u8(h, "skip2a", s->skip2a);
+    nvs_set_u8(h, "gaps", s->short_gaps);
     nvs_set_u8(h, "spk", s->speaker);
     nvs_set_u8(h, "vol", (uint8_t)s->volume);
     nvs_commit(h);

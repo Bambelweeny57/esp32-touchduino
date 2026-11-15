@@ -59,11 +59,27 @@ void tape_out_init(void)
 
 void seekFile() {}   // directory handling lives in the UI
 
+static bool s_user_stop = false;   // set while handling the user's stop command
+
 void stopFile()
 {
+    // Also called by the engine itself at the end of the tape, or when it hits
+    // a block it can't play: leave a message so the UI doesn't keep "Playing".
+    bool was_playing = start == 1;
+    byte id = currentID;
+    unsigned long pos = bytesRead, size = filesize;
     UniStop();
     start = 0;
     pauseOn = false;
+    if (was_playing && !s_user_stop) {
+        if (id == BLOCKID::IDEOF || pos + 16 >= size) {
+            engine_message("End of tape");
+        } else {
+            char m[40];
+            snprintf(m, sizeof(m), "Stopped early (block %02X)", id);
+            engine_message(m);
+        }
+    }
 }
 
 void block_mem_oled() {}   // block positions come from the pre-scan table
@@ -121,6 +137,22 @@ static void scan_tzx(FILE *f, uint32_t size)
             case 0x5A: len = 9; break;
             default:   len = 4 + le32(h); break;   // TZX extension rule
         }
+        // Diagnostics: the gap each data block asks for after itself
+        {
+            int gap = -1;
+            if (id == 0x10) gap = (int)le16(h);
+            else if (id == 0x11) gap = (int)le16(h + 0x0D);
+            else if (id == 0x14) gap = (int)le16(h + 5);
+            else if (id == 0x15) gap = (int)le16(h + 2);
+            else if (id == 0x20) gap = (int)le16(h);
+            if (gap >= 0) ESP_LOGI(TAG, "  id 0x%02x @ %lu: %lu bytes, then %d ms gap", id, (unsigned long)off, (unsigned long)len, gap);
+        }
+        // Diagnostics: where the tape asks the player to stop
+        if (id == 0x20 && le16(h) == 0)
+            ESP_LOGI(TAG, "  stop marker: ID20 'stop the tape' @ %lu (pauses playback)", (unsigned long)off);
+        else if (id == 0x2A)
+            ESP_LOGI(TAG, "  stop marker: ID2A 'stop if 48K' @ %lu (%s)", (unsigned long)off,
+                     skip2A ? "ignored" : "pauses playback");
         switch (id) {
             case 0x12: case 0x13:
                 if (pending < 0) pending = off;
@@ -228,13 +260,14 @@ static void apply_settings(const tape_settings_t *s)
     mselectMask = s->motor_auto;
     TSXCONTROLzxpolarityUEFSWITCHPARITY = s->polarity;
     skip2A = s->skip2a;
+    maxGapMs = s->short_gaps ? 5000 : 0xFFFF;
     monitor_set_enabled(s->speaker);
     monitor_set_volume(s->volume);
 }
 
 static void do_play(const char *path)
 {
-    if (start == 1) stopFile();
+    if (start == 1) { s_user_stop = true; stopFile(); s_user_stop = false; }
     strncpy(tapePath, path, 299);
     tapePath[299] = 0;
     const char *base = strrchr(path, '/');
@@ -271,7 +304,7 @@ static void handle(const Cmd &c)
             }
             break;
         case CMD_STOP:
-            if (start == 1) { stopFile(); engine_message("Stopped"); }
+            if (start == 1) { s_user_stop = true; stopFile(); s_user_stop = false; engine_message("Stopped"); }
             break;
         case CMD_SKIP: {
             int cur = current_block_index();
@@ -288,9 +321,11 @@ static void update_status(void)
     static uint8_t last_id = 0xFF, last_state = 0xFF;
     uint8_t state_now = start != 1 ? 0 : (pauseOn ? 2 : 1);
     if (currentID != last_id || state_now != last_state) {
-        ESP_LOGI(TAG, "%s id 0x%02x task %d blk %d @ %lu/%lu",
-                 state_now == 0 ? "STOP" : state_now == 2 ? "PAUSE" : "PLAY", currentID, (int)currentBlockTask,
-                 start == 1 ? current_block_index() + 1 : 0, (unsigned long)bytesRead, (unsigned long)filesize);
+        char extra[32] = "";
+        if (currentID == BLOCKID::IDPAUSE) snprintf(extra, sizeof(extra), "  gap: %u ms still to play", (unsigned)temppause);
+        ESP_LOGI(TAG, "%s id 0x%02x task %d blk %d @ %lu/%lu%s", state_now == 0 ? "STOP" : state_now == 2 ? "PAUSE" : "PLAY",
+                 currentID, (int)currentBlockTask, start == 1 ? current_block_index() + 1 : 0, (unsigned long)bytesRead,
+                 (unsigned long)filesize, extra);
         last_id = currentID;
         last_state = state_now;
     }
