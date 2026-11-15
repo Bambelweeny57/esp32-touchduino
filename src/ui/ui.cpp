@@ -1002,7 +1002,7 @@ static void status_timer_cb(lv_timer_t *t)
         rem = st.motor_on ? "REM " LV_SYMBOL_PLAY : "REM " LV_SYMBOL_PAUSE;
         col = st.motor_on ? 0x40e070 : 0xe0a040;
     } else {
-        rem = "FORCE RUN";
+        rem = "RUN";
         col = 0x8090a0;
     }
     if (strcmp(rem, lv_label_get_text(lbl_rem)) != 0) {
@@ -1213,17 +1213,25 @@ static void build_main(void)
     lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
 
     lbl_path = lv_label_create(hdr);
-    lv_obj_set_width(lbl_path, 220);
+    lv_obj_set_width(lbl_path, 246);      // ends before the REM tag
     // Scrolls when too long; with the shadow frame buffer only this label redraws
     lv_label_set_long_mode(lbl_path, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_anim_speed(lbl_path, 18, 0);
     lv_obj_set_style_text_font(lbl_path, &lv_font_montserrat_16, 0);
     lv_obj_align(lbl_path, LV_ALIGN_LEFT_MID, 56, 0);
     lv_label_set_text(lbl_path, "");
+    // Hidden: long-press the path to save a screenshot to /sdcard/screenshot.bmp
+    lv_obj_add_flag(lbl_path, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(lbl_path, [](lv_event_t *e) {
+        bool ok = lvgl_port_save_screenshot(SD_MOUNT "/screenshot.bmp");
+        lv_label_set_text(lbl_path, ok ? LV_SYMBOL_OK " Saved screenshot.bmp" : LV_SYMBOL_WARNING " Screenshot failed");
+    }, LV_EVENT_LONG_PRESSED, NULL);
 
     lbl_rem = lv_label_create(hdr);
-    lv_obj_set_style_text_font(lbl_rem, &lv_font_montserrat_14, 0);
-    lv_obj_align(lbl_rem, LV_ALIGN_RIGHT_MID, -108, 0);
+    lv_obj_set_style_text_font(lbl_rem, &lv_font_montserrat_12, 0);
+    lv_obj_set_width(lbl_rem, 52);
+    lv_obj_set_style_text_align(lbl_rem, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lbl_rem, LV_ALIGN_RIGHT_MID, -104, 0);
     lv_label_set_text(lbl_rem, "");
 
     lv_obj_t *refresh = small_btn(hdr, LV_SYMBOL_REFRESH, refresh_cb);

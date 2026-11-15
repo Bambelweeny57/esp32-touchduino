@@ -5,6 +5,7 @@
  */
 
 #include <string.h>
+#include <stdio.h>
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_err.h"
@@ -378,6 +379,50 @@ void lvgl_port_unlock(void)
 {
     assert(lvgl_port_ctx.lvgl_mux && "lvgl_port_init must be called first");
     xSemaphoreGiveRecursive(lvgl_port_ctx.lvgl_mux);
+}
+
+bool lvgl_port_save_screenshot(const char *path)
+{
+    lv_disp_t *disp = lv_disp_get_default();
+    lvgl_port_display_ctx_t *ctx = disp ? (lvgl_port_display_ctx_t *)disp->driver->user_data : NULL;
+    if (!ctx || !ctx->shadow_fb) {
+        return false;
+    }
+    const int W = disp->driver->hor_res;      /* landscape width  (480) = native height */
+    const int H = disp->driver->ver_res;      /* landscape height (320) = native width  */
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "screenshot: cannot create %s", path);
+        return false;
+    }
+    /* 24-bit BMP, rows bottom-up, BGR */
+    const uint32_t row_bytes = (uint32_t)W * 3;           /* 1440: already a multiple of 4 */
+    const uint32_t img_bytes = row_bytes * H;
+    uint8_t hdr[54] = { 'B', 'M' };
+    uint32_t v;
+    v = 54 + img_bytes; memcpy(hdr + 2, &v, 4);
+    v = 54;             memcpy(hdr + 10, &v, 4);
+    v = 40;             memcpy(hdr + 14, &v, 4);
+    v = W;              memcpy(hdr + 18, &v, 4);
+    v = H;              memcpy(hdr + 22, &v, 4);
+    hdr[26] = 1;        hdr[28] = 24;
+    v = img_bytes;      memcpy(hdr + 34, &v, 4);
+    fwrite(hdr, 1, sizeof(hdr), f);
+
+    static uint8_t row[480 * 3];
+    for (int ly = H - 1; ly >= 0; ly--) {
+        for (int lx = 0; lx < W; lx++) {
+            /* logical (lx, ly) is native (nx = H-1-ly, ny = lx) in the shadow */
+            lv_color32_t c = { .full = lv_color_to32(ctx->shadow_fb[lx * H + (H - 1 - ly)]) };
+            row[lx * 3 + 0] = c.ch.blue;
+            row[lx * 3 + 1] = c.ch.green;
+            row[lx * 3 + 2] = c.ch.red;
+        }
+        fwrite(row, 1, row_bytes, f);
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "screenshot saved to %s", path);
+    return true;
 }
 
 void lvgl_port_flush_ready(lv_disp_t *disp)

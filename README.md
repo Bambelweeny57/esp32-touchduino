@@ -10,21 +10,32 @@ It runs on the Guition **JC3248W535** board:
 - microSD slot
 - built-in speaker amplifier
 
-<img src="images/lcd-preview.jpg" alt="ESP32-Touchduino LCD Interface" width="400">
+<img src="images/lcd-preview.jpg" alt="TouchDuino screen playing Manic Miner, with the loading stripes in the preview border" width="480">
 
-> **Status:** early, but working. The firmware builds, boots, mounts the SD card and drives the display and touch. Playback through the speaker and into real machines is being tested now.
+*The screen is a real screenshot from the board, playing `MANIC.TAP` with its loading stripes in the preview border.*
+
+> **Status:** working. Browsing, cover art, playback and the speaker are tested on the board. Loading into a real computer through the 3.5 mm output is still to be tested.
 
 ## Features
 
 - **Supported formats:** TZX, TAP, CDT, TSX, UEF, CAS, P, O, AY, MZF/MZT/M12, MTX, CAQ and Commodore 64 TAP. These use MaxDuino's format code, so timing matches the original.
-- **Touch controls:** previous/next file, block back/forward, play/pause and stop, all as large buttons. There's also a progress bar and a block counter.
+- **Touch controls:** previous/next file, block back/forward, play/pause and stop, all as large buttons. There's also a progress bar and a status line, for example `PLAY Blk 6/6 TAP 2%`.
+- **Glass-style screen:** dark gradient background, rounded panels and gradient buttons. Long folder paths and file names scroll.
 - **File browser:** folders are listed first. It remembers the last folder you used.
-- **Cover art:** if `game.tzx` has a `game.jpg` or `game.png` next to it, that image is shown. Failing that:
-  - it looks for `folder.jpg` or `folder.png` in the folder or any parent folder;
-  - if there's none, a folder named `Spectrum`, `Sinclair`, `Amstrad`, `CPC`, `BBC`, `MSX` or `Dragon` gets a system badge.
+- **Preview "TV":** the selected tape is shown on a small TV screen. The screen shows the first of these it finds:
+  1. `game.jpg` or `game.png` next to `game.tzx` (baseline JPEG or PNG; progressive JPEGs aren't supported);
+  2. `folder.jpg` or `folder.png` in the folder or any parent folder;
+  3. a system badge, if a folder is named `Spectrum`, `Sinclair`, `Amstrad`, `CPC`, `BBC`, `MSX`, `Dragon`, `C64` or `Commodore`;
+  4. otherwise a black screen with a gentle "loading" animation in the border.
+- **Live loading border:** while a tape plays, the TV border is drawn from the real tape signal, lined up with what you hear, like the original loaders:
+  - **ZX Spectrum:** red/cyan bands during the pilot tone and thin blue/yellow bands during data;
+  - **Amstrad CPC and C64:** a different colour for each pulse, like their turbo loaders;
+  - **other machines:** a plain border.
+
+  The border goes black (or the machine's own border colour) whenever there's no sound. Drawing it never touches the tape timing.
 - **Speaker:** the tape signal is mirrored to the onboard speaker, so you can hear it load. Volume is adjustable and there's a test beep.
 - **Line out:** GPIO 17 outputs the signal for a 3.5 mm jack to the computer's EAR/tape input.
-- **Motor control (REM):** in **Auto REM**, the computer's motor line on GPIO 18 pauses and resumes playback. In **Force run** the line is ignored.
+- **Motor control (REM):** in **Auto REM**, the computer's motor line on GPIO 18 pauses and resumes playback, and the header shows **REM ▶** or **REM ❚❚**. In **Force run** the line is ignored and the header shows **RUN**.
 - **Options:** speed for TSX/CAS/CDT (1200–3850 baud), MaxDuino's polarity/parity flag and "skip block 2A". Settings are kept after power-off.
 
 ## Hardware
@@ -61,14 +72,24 @@ pio run -t monitor       # serial log at 115200
 
 The project uses ESP-IDF with LVGL 8.4. ESP-IDF settings live in `sdkconfig.defaults`. After you change that file, delete the generated `sdkconfig.jc3248w535` so it gets rebuilt.
 
+If an upload fails with `No serial data received` after the stub starts, unplug and replug the board, or flash with esptool's ROM loader, which is slower but more tolerant:
+
+```bash
+python ~/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port COM9 --baud 115200 --no-stub write_flash 0x10000 .pio/build/jc3248w535/firmware.bin
+```
+
 ## Using it
 
 1. **Prepare the card.** Format a microSD card as FAT32 (FAT16 is fine for small cards) and copy your tape files onto it. Folders are fine, for example `/Spectrum/Games/Manic Miner.tzx`. Long file names work.
    - UEF files must be uncompressed. Run `gunzip -c game.uef > game.uef.tmp` and rename the result back to `game.uef`.
-2. **Browse.** Tap a folder to open it, ◀ (or `..`) to go back, and ↻ to rescan, for example after swapping cards.
+2. **Browse.** Tap a folder to open it, and ◀ (or `..`) to go back. ↻ re-reads the SD card: use it after swapping cards, since the board can't detect a card change by itself. It stops playback first.
 3. **Play.** Tap a file to select it and see its preview, then tap again or press ▶. ▶ toggles pause while playing and ■ stops.
 4. **Skip blocks.** ◀◀ and ▶▶ jump between data blocks in TZX/TSX/CDT and Spectrum TAP files.
-5. **Options.** The ⚙ screen holds the speaker on/off switch, volume and test beep. It also has the motor mode, baud rate and the MaxDuino flags.
+5. **Multi-load games.** Some games load in parts, such as days, levels or sides.
+   - **TZX images** often contain "stop the tape" markers, and TouchDuino pauses there; press ▶ when the game asks.
+   - **TAP files** have no such markers and play straight through. Pause after a part has loaded and resume when the game asks for the next one, as you would with a real cassette.
+6. **Options.** The ⚙ screen holds the speaker on/off switch, volume and test beep. It also has the motor mode, baud rate and the MaxDuino flags.
+7. **Screenshots.** Press and hold the folder path at the top for about a second. The current screen is saved to the card as `screenshot.bmp`, and the header shows **✓ Saved screenshot.bmp**.
 
 ## How it works
 
@@ -76,6 +97,8 @@ The aim is that touching the screen can never disturb the tape timing.
 
 - **Core 1:** the tape engine and its pulse timer. The timer drives the ESP32-S3 timer hardware directly from internal RAM (IRAM), so playback keeps running even while flash is busy.
 - **Core 0:** the display, touch, SD browsing, cover-art decoding and the speaker task.
+
+The display controller has to receive every update as a whole frame, starting from the top. To keep drawing cheap, LVGL redraws only the parts of the screen that changed into fast internal RAM, and these are merged into a full-frame copy that's streamed to the panel. A still screen costs nothing, and an animated border frame takes about 30 ms, mostly waiting on the display transfer.
 
 The format code in `src/engine/` is copied from MaxDuino almost unchanged. Small compatibility layers stand in for the Arduino pieces it expects:
 

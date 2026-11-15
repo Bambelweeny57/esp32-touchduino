@@ -159,6 +159,13 @@ bool lvgl_port_lock(uint32_t timeout_ms);
  */
 void lvgl_port_unlock(void);
 
+/**
+ * @brief TouchDuino: save the current screen (shadow frame buffer) as a 24-bit
+ *        landscape BMP file, e.g. "/sdcard/screenshot.bmp". Returns false on failure.
+ *        Call with the LVGL lock held.
+ */
+bool lvgl_port_save_screenshot(const char *path);
+
 #ifdef __cplusplus
 }
 #endif
