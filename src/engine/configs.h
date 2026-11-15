@@ -27,7 +27,7 @@
 #define DEFAULT_BAUDRATE 3850
 #define DEFAULT_MSELECTMASK 0       // Force run by default (Auto REM selectable in UI)
 #define DEFAULT_TSXzxpUEF 0
-#define DEFAULT_SKIP2A 0
+#define DEFAULT_SKIP2A 1            // ignore ID2A "stop if 48K" (wrong on 128K); ID20 stop markers still pause
 
 #define MAXPAUSE_PERIOD 8191        // ms, max 8191 (13 bits in the pulse buffer)
 #define BLKBIGSIZE                  // allow > 255 blocks

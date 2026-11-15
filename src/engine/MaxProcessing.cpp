@@ -38,6 +38,7 @@
 #endif
 
 char tapePath[300];   // TouchDuino: full path of the file to play
+word maxGapMs = 0xFFFF; // TouchDuino: longest gap played, in ms (0xFFFF = as in the file)
 
 //Temporarily store for a pulse period before loading it into the buffer.
 word currentPeriod=1;
@@ -1035,6 +1036,7 @@ void TZXProcess() {
       #endif // tapORIC
                 
         case BLOCKID::IDPAUSE:
+          if (temppause > maxGapMs) temppause = maxGapMs;   // TouchDuino: optional cap on long gaps
           if(temppause>0) {
             if(temppause > MAXPAUSE_PERIOD) {
               currentPeriod = MAXPAUSE_PERIOD;

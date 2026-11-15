@@ -15,6 +15,7 @@ word TickToUs(word ticks);
 extern word currentPeriod;
 extern word pauseLength;
 extern char tapePath[];
+extern word maxGapMs;
 extern unsigned long bytesToRead;
 extern bool EndOfFile;
 
