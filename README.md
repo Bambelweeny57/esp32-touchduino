@@ -1,3 +1,5 @@
+![ESP32-Touchduino Banner](images/banner.jpg)
+
 # TouchDuino
 
 An ESP32-S3 port of [MaxDuino](https://github.com/rcmolina/MaxDuino), the tape emulator for 1980s home computers. It has a 3.5" touch screen in place of physical buttons. Put tape images on a microSD card, pick one on the screen, and TouchDuino plays it as a cassette signal for your Spectrum, Amstrad CPC, BBC Micro, MSX and other machines to load.
@@ -7,6 +9,8 @@ It runs on the Guition **JC3248W535** board:
 - 320×480 QSPI touch display
 - microSD slot
 - built-in speaker amplifier
+
+![ESP32-Touchduino LCD Interface](images/lcd-preview.jpg)
 
 > **Status:** early, but working. The firmware builds, boots, mounts the SD card and drives the display and touch. Playback through the speaker and into real machines is being tested now.
 
