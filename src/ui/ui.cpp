@@ -596,6 +596,8 @@ static void do_cover(const Job &j, uint32_t seq)
             std::string p = stem + img_ext[i];
             if (file_exists(p)) img = cover_decode(p.c_str(), SCREEN_W, SCREEN_H);
         }
+        // 1b. Spectrum .tzx / .tap: the loading screen stored in the tape itself
+        if (!img && seq == s_cover_seq) img = cover_from_spectrum_tape(path.c_str(), SCREEN_W, SCREEN_H);
         dir = parent_of(path);
     } else {
         dir = path;

@@ -24,9 +24,10 @@ It runs on the Guition **JC3248W535** board:
 - **File browser:** folders are listed first. It remembers the last folder you used.
 - **Preview "TV":** the selected tape is shown on a small TV screen. The screen shows the first of these it finds:
   1. `game.jpg` or `game.png` next to `game.tzx` (baseline JPEG or PNG; progressive JPEGs aren't supported);
-  2. `folder.jpg` or `folder.png` in the folder or any parent folder;
-  3. a system badge, if a folder is named `Spectrum`, `Sinclair`, `Amstrad`, `CPC`, `BBC`, `MSX`, `Dragon`, `C64` or `Commodore`;
-  4. otherwise a black screen with a gentle "loading" animation in the border.
+  2. for Spectrum `.tzx` and `.tap` files, the **loading screen inside the tape** itself. It is found by its `CODE 16384,6912` header, or as a 6,912-byte screen block on its own. Screens that a game unpacks or draws with a custom loader can't be found this way;
+  3. `folder.jpg` or `folder.png` in the folder or any parent folder;
+  4. a system badge, if a folder is named `Spectrum`, `Sinclair`, `Amstrad`, `CPC`, `BBC`, `MSX`, `Dragon`, `C64` or `Commodore`;
+  5. otherwise a black screen with a gentle "loading" animation in the border.
 - **Live loading border:** while a tape plays, the TV border is drawn from the real tape signal, lined up with what you hear, like the original loaders:
   - **ZX Spectrum:** red/cyan bands during the pilot tone and thin blue/yellow bands during data;
   - **Amstrad CPC and C64:** a different colour for each pulse, like their turbo loaders;
