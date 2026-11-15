@@ -3,8 +3,6 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
-#include "driver/sdspi_host.h"
-#include "driver/spi_common.h"
 #include "driver/sdmmc_host.h"
 #include "driver/gpio.h"
 #include "nvs_flash.h"
@@ -13,15 +11,25 @@
 static const char *TAG = "storage";
 
 #define SD_PIN_CS   10
-#define SD_PIN_MOSI 11
+#define SD_PIN_CMD  11
 #define SD_PIN_CLK  12
-#define SD_PIN_MISO 13
-#define SD_SPI_HOST SPI3_HOST      // SPI2 is used by the QSPI display
+#define SD_PIN_D0   13
 
-static bool s_bus_ready = false;
 static sdmmc_card_t *s_card = NULL;
 
 bool sd_is_mounted(void) { return s_card != NULL; }
+
+// There is no card-detect line on this board, so after a card swap the old
+// mount is stale (the new card is uninitialised). Unmount and start again.
+bool sd_remount(void)
+{
+    if (s_card) {
+        esp_vfs_fat_sdcard_unmount(SD_MOUNT, s_card);
+        s_card = NULL;
+        ESP_LOGI(TAG, "SD unmounted");
+    }
+    return sd_mount();
+}
 
 static const esp_vfs_fat_mount_config_t s_mount_cfg = {
     .format_if_mount_failed = false,
@@ -29,15 +37,10 @@ static const esp_vfs_fat_mount_config_t s_mount_cfg = {
     .allocation_unit_size = 16 * 1024,
 };
 
-// Primary: SDMMC 1-bit mode on CLK 12, CMD 11, D0 13 at 20 MHz, exactly as the
-// vendor demos do. Try it before SPI: once a card sees CMD0 in SPI mode it
-// stays in SPI mode until power is removed. DAT3/CS is held high (SD mode).
+// SDMMC 1-bit mode on CLK 12, CMD 11, D0 13 at 20 MHz, exactly as the vendor
+// demos do. DAT3/CS is held high so the card powers up in SD (not SPI) mode.
 static bool sd_mount_sdmmc(void)
 {
-    if (s_bus_ready) {
-        spi_bus_free(SD_SPI_HOST);
-        s_bus_ready = false;
-    }
     gpio_set_direction(SD_PIN_CS, GPIO_MODE_OUTPUT);
     gpio_set_level(SD_PIN_CS, 1);
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
@@ -45,8 +48,8 @@ static bool sd_mount_sdmmc(void)
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
     slot.width = 1;
     slot.clk = SD_PIN_CLK;
-    slot.cmd = SD_PIN_MOSI;
-    slot.d0 = SD_PIN_MISO;
+    slot.cmd = SD_PIN_CMD;
+    slot.d0 = SD_PIN_D0;
     slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
     esp_err_t err = esp_vfs_fat_sdmmc_mount(SD_MOUNT, &host, &slot, &s_mount_cfg, &s_card);
     if (err != ESP_OK) {
@@ -60,39 +63,12 @@ static bool sd_mount_sdmmc(void)
 }
 
 
+// SDMMC only. SPI mode doesn't work on this board, and an SPI attempt can
+// latch a freshly inserted card into SPI mode until it is power-cycled.
 bool sd_mount(void)
 {
     if (s_card) return true;
-    if (sd_mount_sdmmc()) return true;
-    if (!s_bus_ready) {
-        spi_bus_config_t bus = {
-            .mosi_io_num = SD_PIN_MOSI,
-            .miso_io_num = SD_PIN_MISO,
-            .sclk_io_num = SD_PIN_CLK,
-            .quadwp_io_num = -1,
-            .quadhd_io_num = -1,
-            .max_transfer_sz = 16 * 1024,
-        };
-        if (spi_bus_initialize(SD_SPI_HOST, &bus, SDSPI_DEFAULT_DMA) != ESP_OK) {
-            ESP_LOGE(TAG, "SPI bus init failed");
-            return false;
-        }
-        s_bus_ready = true;
-    }
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.slot = SD_SPI_HOST;
-    host.max_freq_khz = 20000;
-    sdspi_device_config_t slot = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot.gpio_cs = SD_PIN_CS;
-    slot.host_id = SD_SPI_HOST;
-    esp_err_t err = esp_vfs_fat_sdspi_mount(SD_MOUNT, &host, &slot, &s_mount_cfg, &s_card);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SD mount (SPI) failed: %s", esp_err_to_name(err));
-        s_card = NULL;
-        return false;
-    }
-    sdmmc_card_print_info(stdout, s_card);
-    return true;
+    return sd_mount_sdmmc();
 }
 
 static nvs_handle_t open_nvs(void)
