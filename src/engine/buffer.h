@@ -7,9 +7,9 @@
 /* With latest casprocessing logic, buffsize can be any multiple of 2.
 */
 #ifdef LARGEBUFFER
-  #define buffsize 2048
+  #define buffsize 4096
 #else
-  #define buffsize 2048  // TouchDuino: 2 x 1024 pulses so SD/UI latency never starves the ISR
+  #define buffsize 4096  // TouchDuino: 2 x 2048 pulses (~0.75 s each at Spectrum speed) so SD stalls never starve the ISR
 #endif
 
 extern volatile bool morebuff;

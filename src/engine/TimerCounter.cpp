@@ -26,6 +26,7 @@ static const char *TAG = "tape_timer";
 #define TG_NUM  0
 
 static intr_handle_t s_intr = NULL;
+DRAM_ATTR TapeDiag g_tape_diag = {};
 static volatile timerCallback s_cb = NULL;
 static volatile uint32_t s_period = 50000;
 static volatile bool s_in_isr = false;
@@ -56,6 +57,12 @@ static void IRAM_ATTR tape_isr(void *arg)
     timer_ll_clear_intr_status(TG_HW, TIMER_LL_EVENT_ALARM(TG_NUM));
 
     uint64_t alarm = s_alarm;
+    // Diagnostics: how late did this interrupt run? (a late edge stretches a pulse)
+    uint32_t late = (uint32_t)(read_counter() - alarm);
+    if (s_cb) {
+        if (late > g_tape_diag.max_late_us) g_tape_diag.max_late_us = late;
+        if (late > 50) g_tape_diag.late_count++;
+    }
     s_period = 50000;               // idle tick when no callback attached
     timerCallback cb = s_cb;
     if (cb) {

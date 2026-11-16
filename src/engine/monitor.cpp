@@ -45,8 +45,86 @@ static volatile int s_beep_frames = 0;
 
 void monitor_test_beep(int ms) { s_beep_frames = ms * (MON_RATE / 1000); }
 
+// ---- Self-check: decode the generated signal like the Spectrum ROM loader ----
+// Runs on the same edge stream the ISR records (scheduled edge times), so it
+// checks the bytes and pulse lengths TouchDuino produces, independent of the
+// analog side. Logs each standard-speed block: length, flag, XOR parity and
+// the min/max half-pulse lengths seen for 0 and 1 bits.
+static struct {
+    int state;            // 0 idle/pilot, 1 sync1 seen, 2 data
+    int pilot;
+    uint32_t last_t;
+    uint32_t half;        // first half of the current bit (0 = none)
+    uint8_t cur, nbits, flag, parity;
+    uint32_t bytes, bad_halves;
+    uint32_t min0, max0, min1, max1;
+    int block;
+} sc;
+
+static void sc_reset_block(void)
+{
+    sc.state = 0; sc.pilot = 0; sc.half = 0;
+    sc.cur = 0; sc.nbits = 0; sc.parity = 0; sc.bytes = 0; sc.bad_halves = 0;
+    sc.min0 = sc.min1 = 0xFFFFFFFF; sc.max0 = sc.max1 = 0;
+}
+
+static void sc_finish(const char *why)
+{
+    if (sc.state == 2 && sc.bytes > 0) {
+        ESP_LOGI(TAG, "selfcheck block %d: %lu bytes, flag 0x%02X, parity %s, %u stray bits, "
+                 "0-half %lu..%lu us, 1-half %lu..%lu us, odd halves %lu (%s)",
+                 sc.block, (unsigned long)sc.bytes, sc.flag, sc.parity == 0 ? "OK" : "BAD",
+                 sc.nbits, (unsigned long)sc.min0, (unsigned long)sc.max0,
+                 (unsigned long)sc.min1, (unsigned long)sc.max1, (unsigned long)sc.bad_halves, why);
+        sc.block++;
+    }
+    sc_reset_block();
+}
+
+static void sc_edge(uint32_t t)
+{
+    uint32_t d = t - sc.last_t;
+    sc.last_t = t;
+    if (d > 1500) {                       // pause / silence ends a block
+        sc_finish("gap");
+        return;
+    }
+    switch (sc.state) {
+    case 0:
+        if (d >= 500 && d <= 750) sc.pilot++;
+        else if (d < 300 && sc.pilot >= 200) sc.state = 1;   // sync 1
+        else sc.pilot = 0;
+        break;
+    case 1:
+        if (d < 300) { sc.state = 2; sc.half = 0; }         // sync 2
+        else sc_reset_block();
+        break;
+    case 2: {
+        if (sc.half == 0) { sc.half = d; break; }
+        uint32_t a = sc.half, sum = a + d;
+        sc.half = 0;
+        int bit = sum > 733 ? 1 : 0;
+        if (d >= 500 && d <= 750 && a >= 500 && a <= 750) { sc_finish("pilot"); sc.pilot = 2; break; }
+        // both halves of a bit should be the same length
+        if ((a > d ? a - d : d - a) > 60) sc.bad_halves++;
+        uint32_t lo = a < d ? a : d, hi = a > d ? a : d;
+        if (bit) { if (lo < sc.min1) sc.min1 = lo; if (hi > sc.max1) sc.max1 = hi; }
+        else     { if (lo < sc.min0) sc.min0 = lo; if (hi > sc.max0) sc.max0 = hi; }
+        sc.cur = (uint8_t)((sc.cur << 1) | bit);
+        if (++sc.nbits == 8) {
+            if (sc.bytes == 0) sc.flag = sc.cur;
+            sc.parity ^= sc.cur;
+            sc.bytes++;
+            sc.nbits = 0; sc.cur = 0;
+        }
+        break;
+    }
+    }
+}
+
 static void monitor_task(void *arg)
 {
+    sc_reset_block();
     static int16_t buf[MON_FRAMES * 2];
     const int64_t step_ns = 1000000000LL / MON_RATE;
     int64_t cursor_ns = 0;
@@ -71,9 +149,11 @@ static void monitor_task(void *arg)
                 const mon_edge_t *e = &g_mon_ring[tail & (MON_RING_SIZE - 1)];
                 if ((int32_t)(e->t - t) > 0) break;
                 level = e->level;
+                sc_edge(e->t);
                 tail++;
             }
             g_mon_tail = tail;
+            if (sc.state == 2 && (int32_t)(t - sc.last_t) > 200000) sc_finish("end");
             if (beep) {
                 level = (s_beep_frames / 22) & 1;   // ~1 kHz square
                 if (s_beep_frames > 0) s_beep_frames = s_beep_frames - 1;

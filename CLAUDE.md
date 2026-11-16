@@ -22,7 +22,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 | `src/engine/configs.h` | Replaces MaxDuino userconfig chain; all formats enabled |
 | `src/engine/TimerCounter.cpp` | gptimer 1 MHz; alarms re-armed relative to previous alarm (no drift); ISR IRAM-safe |
 | `src/engine/pinSetup.h` | GPIO17 tape out via direct register writes; GPIO18 motor sense |
-| `src/engine/file_utils.cpp` | SdFat replaced by `TapeFile` (FILE* + 16 KB read cache) |
+| `src/engine/file_utils.cpp` | SdFat replaced by `TapeFile` (FILE* + 4 KB read cache) |
 | `src/engine/engine.cpp` | Replaces MaxDuino.ino: FreeRTOS task on core 1, command queue, TZX/TAP block pre-scan for block skip, REM handling, status snapshot |
 | `src/engine/tape_engine.h` | C API used by the UI (`tape_play/pause/stop/block_skip/apply_settings/get_status`) |
 | `src/engine/monitor.cpp` | **Speaker output**: ISR records edges into a ring; task on core 0 replays them to the onboard I2S amp (BCK 42, WS 2, DOUT 41) at 44.1 kHz, ~40 ms behind, DC-blocked |
@@ -31,8 +31,8 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 | `src/ui/cover.cpp` | JPG (LVGL tjpgd) / PNG (lodepng) decode + scale into PSRAM |
 
 ## Changes made to upstream MaxDuino files (keep minimal, mark with "TouchDuino")
-- `buffer.h/.cpp`: buffsize 2048, readpos/writepos widened to `word`, buffer in DRAM
-- `isr.cpp`: `wave2` marked `IRAM_ATTR`
+- `buffer.h/.cpp`: buffsize 4096, readpos/writepos widened to `word`, buffer in DRAM, clearBuffer fills 50 us hold entries
+- `isr.cpp`: `wave2` marked `IRAM_ATTR`; underrun counter at the page swaps (`g_tape_diag`)
 - `MaxProcessing.cpp/.h`: `tapePath[]` global; `UniPlay` opens `entry.open(tapePath)`
 - `casProcessing.cpp`: fixed upstream bug `for (byte i=9; i>=0; --i)` (infinite loop) -> `int`
 
@@ -54,9 +54,9 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - [x] SD card works in **SDMMC 1-bit** mode (as vendor demos). SPI mode does not work on this board and can latch a card into SPI mode until power-cycled, so the SPI fallback was removed.
 - [x] ↻ button unmounts + remounts the card (no card-detect pin), stopping playback first; card swap verified by user 2026-11-15
 - [x] Speaker test beep and .tap playback through the speaker verified by user 2026-11-15
-- [ ] Copy some .tzx/.tap onto the card and test playback (check serial log for "play ..." / "navigable blocks")
-- [ ] User to confirm display/touch UI looks right
-- [ ] Test with speaker (arriving 2026-11-15): Options > Test, then play a .tzx and listen; then test loading into a real machine via 3.5 mm
+- [x] TAP/TZX playback on the board, speaker, UI confirmed by user
+- [x] Loads on a real ZX Spectrum 48K and 128K through the LM386 stage (2026-11-16, see "Real Spectrum tests")
+- [ ] BBC Micro, MSX, Oric; REM tests (Oric and MSX) when the 2.5 mm sockets arrive
 
 ## Gotchas
 - ESP-IDF builds with -Werror=switch etc.; upstream engine files get relaxed warnings in `src/CMakeLists.txt` (only `src/engine/*.cpp`)
@@ -101,6 +101,18 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - Machines available: ZX Spectrum, BBC Micro, MSX, Oric Atmos (a scratch-built one, so the REM relay can be seen and heard; the MSX REM relay is audible too). The Oric and MSX are the best REM test machines.
 - Build the line-out filter from `images/line-out.png` (C2 + toward the board). Note per machine: loads / fails partway / never starts, and the file used.
 - Verified on the board so far: speaker, TAP/TZX playback, live border, card swap, browse lock, End of tape, long-gap shortening (matches an Android player; MaxDuino on a TZXduino plays the full 35 s gap).
+
+## Real Spectrum tests (2026-11-16)
+- **MANIC.TAP loads on the real Spectrum** (through the LM386 stage, `images/line-out-lm386.png`, VR1 mid, PC USB power).
+- Bug 1, underrun: the 16 KB SD cache refill outlasted a buffer page. Fixed: TAPE_CACHE_SIZE 4 KB, buffsize 4096, clearBuffer fills 50 us hold entries (0x5032) instead of zeros (which play as 1 ms each).
+- Bug 2, tape tail lost: upstream's 255-entry EOF flush is shorter than the bigger buffer, so stopFile() dropped ~200 bytes from the end of the last block ("R Tape loading error 20:5"). Fixed: `drain_tape()` in engine.cpp pads with holds and waits for two page swaps on a natural stop (not on a user stop).
+- Diagnostics left in: `timing @` lines every 5 s (ISR lateness, underruns; TimerCounter `g_tape_diag`) and the **self-check decoder** in monitor.cpp. It decodes the recorded edge stream like the Spectrum ROM and logs `selfcheck block N: bytes, flag, parity OK/BAD, half-pulse min..max`. Use it first when a load fails: parity BAD or a short length = software; all OK = analog/noise.
+- The GPIO17 + RC filter alone was too quiet for this Spectrum; the ZAXON TZXduino has an LM386 too (no pot on it).
+- Results (VR1 mid, PC USB power): Manic Miner TAP x2 and Decathlon TAP x2 (48K); D.N.A. Warrior TZX, Auf Wiedersehen Monty TZX, Marauder TZX with countdown loader (128K). Marauder TAP hangs after loading but the self-check shows every byte sent correctly: a modified TAP (BASIC 295 bytes vs 83 in the TZX).
+- The last block of a file self-checks as "N+15 bytes, 7 stray bits, 0-half 10.." because upstream's IDEOF flush toggles the pin every 10 us (255 times) straight after the data. Harmless (the ROM has stopped reading); the TZXduino does the same. Could make the self-check ignore pulses < 100 us.
+- The earlier Decathlon "stopped at 50%" was never reproduced (likely a loose breadboard wire). Decathlon plays on into Day 2 after Day 1; the game ignores it.
+- README now documents the LM386 circuit and the self-check; `images/line-out.png` (no amp) is kept as the REM/plain-filter reference.
+- Next: BBC, MSX and Oric.
 
 ## Spectrum loading screens (2026-11-15)
 - `cover_from_spectrum_tape()` in cover.cpp: walks TZX (ID10/11/14 data) or TAP blocks, finds a SCREEN$ (a "CODE 16384,6912" header + data block, else a headerless 6914-byte block with flag 0xFF), decodes the 6912 bytes (interleaved bitmap + attributes, BRIGHT 0xFF / normal 0xD7) to 256x192 and box-filter scales it to the TV screen (122x92).

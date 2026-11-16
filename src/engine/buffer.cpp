@@ -10,10 +10,13 @@ volatile byte * readBuffer=wbuffer[1]; // this pointer is not volatile since thi
 void clearBuffer(void)
 {
   noInterrupts();
-  for(word i=0;i<buffsize;i++)
+  // TouchDuino: fill with short "hold" entries (0x5000 | 50 us: keep the output
+  // level, no edge) instead of zeros, which the ISR plays as 1 ms each. With a
+  // bigger buffer, zeros would add seconds of silence at start and after a jump.
+  for(word i=0;i<buffsize;i+=2)
   {
-    wbuffer[0][i]=0;
-    wbuffer[1][i]=0;
+    wbuffer[0][i]=0x50; wbuffer[0][i+1]=0x32;
+    wbuffer[1][i]=0x50; wbuffer[1][i+1]=0x32;
   }
   interrupts();
 }

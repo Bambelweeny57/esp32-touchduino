@@ -2,7 +2,7 @@
 #include "file_utils.h"
 #include "esp_heap_caps.h"
 
-#define TAPE_CACHE_SIZE (16 * 1024)
+#define TAPE_CACHE_SIZE (4 * 1024)   // small reads: one slow SD read can never outlast a buffer page
 
 TapeFile entry;
 unsigned long bytesRead = 0;

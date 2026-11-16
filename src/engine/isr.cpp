@@ -85,6 +85,7 @@ void IRAM_ATTR wave2() {
         volatile byte * tmp = readBuffer;
         readBuffer = writeBuffer;
         writeBuffer = tmp;
+        if (writepos < buffsize || morebuff) g_tape_diag.underruns++;   // TouchDuino diag: page not refilled in time
         morebuff = true;                  //Request more data to fill inactive page
       } 
       workingPeriod = word(readBuffer[readpos], readBuffer[readpos+1]);
@@ -199,6 +200,7 @@ _next:
     volatile byte * tmp = readBuffer;
     readBuffer = writeBuffer;
     writeBuffer = tmp;
+    if (writepos < buffsize || morebuff) g_tape_diag.underruns++;   // TouchDuino diag: page not refilled in time
     morebuff = true;                  //Request more data to fill inactive page
   } 
 
