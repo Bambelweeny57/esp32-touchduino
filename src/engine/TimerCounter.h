@@ -23,4 +23,12 @@ void tape_timer_create(void);
 // Current tape timeline in microseconds (used by the speaker monitor)
 uint64_t tape_timer_now_us(void);
 
+// TouchDuino diagnostics, reset by the engine when it logs them
+struct TapeDiag {
+    volatile uint32_t max_late_us;   // worst interrupt lateness
+    volatile uint32_t late_count;    // interrupts more than 50 us late
+    volatile uint32_t underruns;     // ISR switched to a buffer page the engine had not refilled
+};
+extern TapeDiag g_tape_diag;
+
 #endif

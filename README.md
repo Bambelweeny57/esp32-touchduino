@@ -14,7 +14,7 @@ It runs on the Guition **JC3248W535** board:
 
 *The screen is a real screenshot from the board, playing `MANIC.TAP` with its loading stripes in the preview border.*
 
-> **Status:** working. Browsing, cover art, playback and the speaker are tested on the board. Loading into a real computer through the 3.5 mm output is still to be tested.
+> **Status:** working. Browsing, cover art, playback and the speaker are tested on the board. Games load on a real ZX Spectrum 48K and 128K through the LM386 line-out stage (see [Real-machine tests](#real-machine-tests)). The BBC Micro, MSX and Oric are still to be tested.
 
 ## Features
 
@@ -62,18 +62,27 @@ GPIO 17 and 18 are on the 4-pin expansion connectors (GND, 3.3V, IO17, IO18).
 
 ### Wiring the tape output
 
-<img src="images/line-out.png" alt="Line-out filter: IO17 through R1 1 kΩ, C1 10 nF to ground, C2 10 µF coupling capacitor and R2 4.7 kΩ to ground, to the tip of a 3.5 mm plug; REM switch between IO18 and ground" width="640">
+GPIO 17 on its own is too quiet for a real Spectrum: the loading tones were barely audible through its speaker. Like the ZAXON TZXduino, TouchDuino needs a small LM386 amplifier between the pin and the jack.
+
+<img src="images/line-out-lm386.png" alt="Line output with an LM386: IO17 through R1 1 kΩ, C1 10 nF to ground and C2 10 µF to a 10 kΩ volume pot; the wiper feeds LM386 pin 3; pin 5 drives the jack tip through C3 100 µF, with R3 10 Ω and C4 47 nF to ground; pin 6 to +5 V (VIN) with C6 100 nF; pins 2 and 4 to ground; optional C5 10 µF on pin 7" width="760">
 
 | Part | Value | Job |
 | --- | --- | --- |
 | R1 | 1 kΩ | Limits current from the pin; with C1 it rounds off the sharp edges |
 | C1 | 10 nF | Low-pass filter with R1 (about 16 kHz), so even the fastest turbo loaders pass |
-| C2 | 10 µF electrolytic, **+ toward the board** | Blocks the 1.65 V DC offset of the 0–3.3 V signal |
-| R2 | 4.7 kΩ | Holds the output at 0 V when idle |
+| C2 | 10 µF electrolytic, **+ toward the board** | Blocks the DC level of the 0–3.3 V signal |
+| VR1 | 10 kΩ pot | Volume. The middle setting loads on a 48K and a 128K Spectrum |
+| U1 | LM386 | Amplifier, gain 20 (pins 1 and 8 not connected) |
+| C6 | 100 nF | Supply decoupling on pin 6, close to the chip |
+| C5 | 10 µF (optional) | Bypass on pin 7, reduces hum |
+| R3 + C4 | 10 Ω + 47 nF in series, pin 5 to GND | Stops the LM386 oscillating |
+| C3 | 100 µF electrolytic, **+ toward the LM386** | Output coupling to the jack |
 
+- **Power:** the LM386 runs from **+5 V on the VIN pin of the UART connector** (USB power). Check it with a meter first; the 3.3 V pin is not enough.
 - **Plug:** jack **tip** carries the signal and **sleeve** goes to GND. With a stereo cable, joining tip and ring is fine.
-- **No amplifier needed:** GPIO 17 swings 0–3.3 V, which is already at or above the level of a cassette player's headphone output. MaxDuino and TZXDuino builds feed the EAR input directly in the same way. If a machine struggles, try a *lower* level first, for example with a 10 kΩ volume pot in place of R2 (wiper to the tip).
-- **Don't connect a speaker straight to GPIO 17.** Use the board's speaker connector to listen.
+- **Volume:** start with VR1 low and turn it up until the computer loads reliably, like the volume on a tape deck.
+- **Without the amplifier:** the plain RC filter in [images/line-out.png](images/line-out.png) (the same parts up to C2, with a 4.7 kΩ resistor to ground) is enough for a scope or a quiet test, but not for the Spectrum we tried.
+- **Don't connect a speaker straight to GPIO 17.** Use the board's speaker connector to listen. Don't use the speaker connector as a line out either: the onboard amplifier is a bridged class-D output, so neither speaker terminal is ground.
 - **Different machines need different leads:**
   - **ZX Spectrum:** the EAR socket.
   - **Amstrad CPC 664/6128:** the DIN tape socket. The CPC 464's built-in deck needs a cassette adaptor or a modification.
@@ -81,6 +90,23 @@ GPIO 17 and 18 are on the 4-pin expansion connectors (GND, 3.3V, IO17, IO18).
   - **Commodore 64:** has no audio input, so it needs a datasette-port interface instead of this circuit.
 - **Motor sense (optional):** the computer's REM output is a switch (a relay contact) that closes while the motor should run. Wire it between GPIO 18 and GND. The pin has a pull-up, so closed means play. Select **Auto REM** in Options.
 - **Auto REM without a cable:** with nothing on GPIO 18, Auto REM keeps playback paused. That's why the default is Force run.
+
+## Real-machine tests
+
+Loaded through the LM386 stage, VR1 at the middle setting, board on PC USB power:
+
+| Game | Machine | File | Result |
+| --- | --- | --- | --- |
+| Manic Miner | ZX Spectrum 48K | TAP | Loads (2 out of 2) |
+| Daley Thompson's Decathlon | ZX Spectrum 48K | TAP, Day 1 + Day 2 on one tape | Loads (2 out of 2) |
+| D.N.A. Warrior | ZX Spectrum 128K | TZX, 35 s gap shortened to 5 s | Loads |
+| Auf Wiedersehen Monty | ZX Spectrum 128K | TZX, blocks back to back | Loads |
+| Marauder | ZX Spectrum 128K | TZX, countdown loader | Loads |
+| Marauder | ZX Spectrum 128K | TAP | Hangs after loading, but TouchDuino sent every byte correctly: a modified TAP; the TZX works |
+
+**Self-check:** while a tape plays, TouchDuino decodes its own output the way the Spectrum ROM does. For each standard-speed block, the serial log shows a line like
+`selfcheck block 5: 32770 bytes, flag 0xFF, parity OK, ... 0-half 244..244 us, 1-half 489..489 us`.
+If a game fails to load and every block says *parity OK* at the right length, the data left TouchDuino intact: look at the lead, the volume or the file instead. Turbo blocks aren't decoded, and the last block of a file shows a few extra bytes from MaxDuino's end-of-file flush, which the computer ignores.
 
 ## Building and flashing
 

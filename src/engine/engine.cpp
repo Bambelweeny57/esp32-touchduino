@@ -10,6 +10,7 @@
 #include "freertos/queue.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "configs.h"
 #include "Arduino.h"
@@ -61,11 +62,35 @@ void seekFile() {}   // directory handling lives in the UI
 
 static bool s_user_stop = false;   // set while handling the user's stop command
 
+// When the engine stops itself (end of tape), up to two buffer pages of pulses
+// are still queued for the ISR: upstream's 255-entry EOF flush only covers its
+// much smaller buffer. Pad with "hold" entries and wait until the ISR has
+// played both pages, otherwise the end of the last block is lost (the Spectrum
+// reported "R Tape loading error" on Manic Miner: ~200 bytes short).
+static void drain_tape(void)
+{
+    for (int page = 0; page < 2; page++) {
+        noInterrupts();
+        bool swapped = morebuff;
+        morebuff = false;
+        interrupts();
+        if (swapped) writepos = 0;
+        while (writepos < buffsize) {
+            writeBuffer[writepos] = 0x50;       // 0x5000 | 50 us: hold the level
+            writeBuffer[writepos + 1] = 0x32;
+            writepos += 2;
+        }
+        int64_t t0 = esp_timer_get_time();
+        while (!morebuff && esp_timer_get_time() - t0 < 3000000) vTaskDelay(1);
+    }
+}
+
 void stopFile()
 {
     // Also called by the engine itself at the end of the tape, or when it hits
     // a block it can't play: leave a message so the UI doesn't keep "Playing".
     bool was_playing = start == 1;
+    if (was_playing && !s_user_stop && !pauseOn) drain_tape();
     byte id = currentID;
     unsigned long pos = bytesRead, size = filesize;
     UniStop();
@@ -402,6 +427,19 @@ static void engine_task(void *arg)
         if (now - last_status > 50) {
             update_status();
             last_status = now;
+        }
+        // Diagnostics while playing: timing and buffer health every 5 s
+        static uint32_t last_diag = 0;
+        if (start == 1 && !pauseOn && now - last_diag > 5000) {
+            ESP_LOGI(TAG, "timing @ %lu/%lu: max ISR late %lu us, late>50us %lu, underruns %lu",
+                     (unsigned long)bytesRead, (unsigned long)filesize, (unsigned long)g_tape_diag.max_late_us,
+                     (unsigned long)g_tape_diag.late_count, (unsigned long)g_tape_diag.underruns);
+            g_tape_diag.max_late_us = 0;
+            g_tape_diag.late_count = 0;
+            g_tape_diag.underruns = 0;
+            last_diag = now;
+        } else if (start != 1) {
+            last_diag = now;
         }
     }
 }
