@@ -9,6 +9,14 @@
 #include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "tinyusb.h"
+#include "tusb_msc_storage.h"
+#include "tusb_tasks.h"
+#include "esp_private/usb_phy.h"
+#include "soc/rtc_cntl_reg.h"
 
 static const char *TAG = "storage";
 
@@ -49,18 +57,25 @@ static const esp_vfs_fat_mount_config_t s_mount_cfg = {
 
 // SDMMC 1-bit mode on CLK 12, CMD 11, D0 13 at 20 MHz, exactly as the vendor
 // demos do. DAT3/CS is held high so the card powers up in SD (not SPI) mode.
-static bool sd_mount_sdmmc(void)
+static void sd_host_slot(sdmmc_host_t *host, sdmmc_slot_config_t *slot)
 {
     gpio_set_direction(SD_PIN_CS, GPIO_MODE_OUTPUT);
     gpio_set_level(SD_PIN_CS, 1);
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;   // 20 MHz
-    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot.width = 1;
-    slot.clk = SD_PIN_CLK;
-    slot.cmd = SD_PIN_CMD;
-    slot.d0 = SD_PIN_D0;
-    slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+    *host = (sdmmc_host_t)SDMMC_HOST_DEFAULT();
+    host->max_freq_khz = SDMMC_FREQ_DEFAULT;   // 20 MHz
+    *slot = (sdmmc_slot_config_t)SDMMC_SLOT_CONFIG_DEFAULT();
+    slot->width = 1;
+    slot->clk = SD_PIN_CLK;
+    slot->cmd = SD_PIN_CMD;
+    slot->d0 = SD_PIN_D0;
+    slot->flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+}
+
+static bool sd_mount_sdmmc(void)
+{
+    sdmmc_host_t host;
+    sdmmc_slot_config_t slot;
+    sd_host_slot(&host, &slot);
     esp_err_t err = esp_vfs_fat_sdmmc_mount(SD_MOUNT, &host, &slot, &s_mount_cfg, &s_card);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "SD mount (SDMMC 1-bit) failed: %s", esp_err_to_name(err));
@@ -72,6 +87,110 @@ static bool sd_mount_sdmmc(void)
     return true;
 }
 
+// ---- USB file transfer mode --------------------------------------------------
+// The card is handed to the PC as a USB drive (TinyUSB mass storage on the
+// native USB port, shared with the USB-Serial-JTAG that gives the COM port).
+// Switching the port at runtime fought with the USB-Serial-JTAG (chip resets,
+// no pull-up, watchdog), so the mode is entered and left with a reboot:
+//   switch on  -> sd_usb_request_boot() + restart -> boot straight into USB mode
+//   Exit       -> sd_usb_exit(): restart -> normal boot reclaims the COM port
+// The boot flag is one-shot (cleared when read), so a crash in USB mode always
+// ends in a normal boot.
+static sdmmc_card_t *s_usb_card = NULL;
+static bool s_usb_active = false;
+
+bool sd_usb_active(void) { return s_usb_active; }
+bool sd_usb_host_connected(void) { return s_usb_active && tud_mounted(); }
+
+static nvs_handle_t open_nvs(void);
+
+void sd_usb_request_boot(void)
+{
+    nvs_handle_t h = open_nvs();
+    if (!h) return;
+    nvs_set_u8(h, "usbboot", 1);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+bool sd_usb_boot_pending(void)
+{
+    nvs_handle_t h = open_nvs();
+    if (!h) return false;
+    uint8_t v = 0;
+    bool pending = nvs_get_u8(h, "usbboot", &v) == ESP_OK && v;
+    if (pending) {
+        nvs_erase_key(h, "usbboot");
+        nvs_commit(h);
+    }
+    nvs_close(h);
+    return pending;
+}
+
+void sd_usb_boot_init(void)
+{
+    // Normal boot: after USB mode (a software reset keeps the RTC USB routing)
+    // the port may still be routed to the OTG controller. Route it back to
+    // the USB-Serial-JTAG and re-enable its reset (esptool's auto-reset).
+    static usb_phy_handle_t jtag_phy = NULL;
+    if (!jtag_phy && (REG_READ(RTC_CNTL_USB_CONF_REG) & RTC_CNTL_SW_USB_PHY_SEL)) {
+        const usb_phy_config_t jtag = {
+            .controller = USB_PHY_CTRL_SERIAL_JTAG,
+            .target = USB_PHY_TARGET_INT,
+        };
+        if (usb_new_phy(&jtag, &jtag_phy) != ESP_OK) jtag_phy = NULL;
+        ESP_LOGI(TAG, "USB port handed back to the COM port");
+    }
+    REG_CLR_BIT(RTC_CNTL_USB_CONF_REG, RTC_CNTL_IO_MUX_RESET_DISABLE | RTC_CNTL_USB_RESET_DISABLE);
+}
+
+bool sd_usb_start(void)
+{
+    if (s_usb_active) return true;
+    if (s_card) {
+        esp_vfs_fat_sdcard_unmount(SD_MOUNT, s_card);
+        s_card = NULL;
+    }
+    sdmmc_host_t host;
+    sdmmc_slot_config_t slot;
+    sd_host_slot(&host, &slot);
+    if (host.init() != ESP_OK) return false;
+    if (sdmmc_host_init_slot(host.slot, &slot) != ESP_OK) { host.deinit(); return false; }
+    s_usb_card = (sdmmc_card_t *)calloc(1, sizeof(sdmmc_card_t));
+    if (!s_usb_card || sdmmc_card_init(&host, s_usb_card) != ESP_OK) {
+        ESP_LOGW(TAG, "USB mode: no SD card");
+        free(s_usb_card);
+        s_usb_card = NULL;
+        host.deinit();
+        return false;
+    }
+    const tinyusb_msc_sdmmc_config_t msc = {
+        .card = s_usb_card,
+        .mount_config = { .format_if_mount_failed = false, .max_files = 8, .allocation_unit_size = 16 * 1024 },
+    };
+    ESP_LOGI(TAG, "USB mode: card ready, %lu sectors", (unsigned long)s_usb_card->csd.capacity);
+    ESP_ERROR_CHECK(tinyusb_msc_storage_init_sdmmc(&msc));
+    // Taking the port from the USB-Serial-JTAG looks like a "reset me" line
+    // change to it, and it resets the whole chip (ESP_RST_USB): block that.
+    REG_SET_BIT(RTC_CNTL_USB_CONF_REG, RTC_CNTL_IO_MUX_RESET_DISABLE | RTC_CNTL_USB_RESET_DISABLE);
+    const tinyusb_config_t tusb = { 0 };      // default descriptors (Kconfig strings)
+    if (tinyusb_driver_install(&tusb) != ESP_OK) {
+        ESP_LOGE(TAG, "USB mode: TinyUSB install failed");
+        return false;
+    }
+    s_usb_active = true;
+    ESP_LOGI(TAG, "USB mode: TinyUSB running");
+    return true;
+}
+
+void sd_usb_exit(void)
+{
+    if (s_usb_active) {
+        tud_disconnect();                    // the PC sees the drive removed
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    esp_restart();                           // normal boot: COM port, card remounted
+}
 
 // SDMMC only. SPI mode doesn't work on this board, and an SPI attempt can
 // latch a freshly inserted card into SPI mode until it is power-cycled.

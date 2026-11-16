@@ -137,7 +137,8 @@ python ~/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port CO
    - **TZX images** often contain "stop the tape" markers, and TouchDuino pauses there; press ▶ when the game asks. "Stop if 48K" markers are ignored unless you turn off **Skip TZX block 2A**.
    - **TAP files** have no such markers and play straight through. Pause after a part has loaded and resume when the game asks for the next one, as you would with a real cassette.
 6. **Options.** The ⚙ screen holds the speaker on/off switch, volume and test beep. It also has the motor mode, baud rate and the MaxDuino flags.
-7. **Screenshots.** Press and hold the folder path at the top for about a second. The current screen is saved to the card as `screenshot.bmp`, and the header shows **✓ Saved screenshot.bmp**.
+7. **USB file transfer.** Instead of taking the card out, turn on **Options → USB file transfer**. TouchDuino restarts into a USB drive screen and the SD card appears on the PC as a drive called *TouchDuino SD card*: copy, rename and delete files and make folders as usual. Tape playback is off, and the COM port is gone, while the drive is attached. Eject the drive on the PC, then press **Exit**: TouchDuino restarts and reads the card again.
+8. **Screenshots.** Press and hold the folder path at the top for about a second. The current screen is saved to the card as `screenshot.bmp`, and the header shows **✓ Saved screenshot.bmp**.
 
 ## How it works
 

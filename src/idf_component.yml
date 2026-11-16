@@ -1,0 +1,7 @@
+## IDF Component Manager manifest (PlatformIO fetches these at build time)
+dependencies:
+  idf: ">=5.0"
+  # USB mass storage: the SD card as a USB drive (file transfer mode)
+  espressif/esp_tinyusb: "~1.4.4"
+  # TinyUSB core matching esp_tinyusb 1.4 (0.21 crashed / never enumerated)
+  espressif/tinyusb: "~0.15.0"

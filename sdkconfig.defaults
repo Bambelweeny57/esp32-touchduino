@@ -37,3 +37,16 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+
+# USB file transfer mode: the SD card as a USB drive (TinyUSB MSC on the native USB port)
+CONFIG_TINYUSB_MSC_ENABLED=y
+# 512 = the Espressif default. 8192 hung the USB IN interrupt on the first
+# disk read (interrupt watchdog in proc_read10_cmd -> usbd_edpt_xfer)
+CONFIG_TINYUSB_MSC_BUFSIZE=512
+CONFIG_TINYUSB_TASK_AFFINITY_CPU0=y
+CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="TouchDuino"
+CONFIG_TINYUSB_DESC_PRODUCT_STRING="TouchDuino SD card"
+CONFIG_TINYUSB_DESC_MSC_STRING="TouchDuino SD card"
+# No TinyUSB debug prints: they run inside the USB ISR and, with the COM port
+# gone in USB mode, stall it into the interrupt watchdog
+CONFIG_TINYUSB_DEBUG_LEVEL=0
