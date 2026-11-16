@@ -26,7 +26,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 | `src/engine/engine.cpp` | Replaces MaxDuino.ino: FreeRTOS task on core 1, command queue, TZX/TAP block pre-scan for block skip, REM handling, status snapshot |
 | `src/engine/tape_engine.h` | C API used by the UI (`tape_play/pause/stop/block_skip/apply_settings/get_status`) |
 | `src/engine/monitor.cpp` | **Speaker output**: ISR records edges into a ring; task on core 0 replays them to the onboard I2S amp (BCK 42, WS 2, DOUT 41) at 44.1 kHz, ~40 ms behind, DC-blocked |
-| `src/app/storage.c` | SD at `/sdcard`: SDMMC 1-bit only (CLK12 CMD11 D0 13); `sd_remount()` for card swaps; NVS settings |
+| `src/app/storage.c` | SD at `/sdcard`: SDMMC 1-bit only (CLK12 CMD11 D0 13); `sd_remount()` for card swaps; USB file transfer mode (`sd_usb_*`); NVS settings |
 | `src/ui/ui.cpp` | LVGL UI: header, paged file list, preview pane (cover art / system badge), progress, 6 transport buttons, settings screen |
 | `src/ui/cover.cpp` | JPG (LVGL tjpgd) / PNG (lodepng) decode + scale into PSRAM |
 
@@ -79,6 +79,15 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - Preview is a "TV": bezel > border frame (TV_BORDER 8 px) > screen 144x92. Border colour is the system's (Spectrum light grey, CPC blue, C64 light blue...).
 - Loading border while playing is the **live signal** (`draw_live`): reads the last 20 ms of edges from `g_mon_ring` (recorded by the ISR for the speaker, now always recorded), ~35 ms behind to line up with the speaker, one row per ~185 us. Spectrum: red/cyan for pulses >= 540 us (pilot), blue/yellow for shorter (data); CPC/C64: a palette colour per pulse. Gaps > 3 ms = silence = system border colour (Spectrum black). Other formats (BBC, MSX, Oric, Jupiter...) keep a static border. `tape_status_t.phase` is still reported but no longer used by the UI.
 - Image fallback chain: game.jpg/png -> folder.jpg/png up the tree -> system badge from folder name -> default placeholder (black screen, cycling Spectrum-style loading border).
+
+## USB file transfer mode (2026-11-16)
+- Options > **USB file transfer** shows the SD card to the PC as a USB drive (TinyUSB MSC on the native USB port, `src/app/storage.c` `sd_usb_*`, screen `build_usb()` in ui.cpp). Verified by the user: browse, delete, rename, new folder, copy, eject, Exit.
+- Components via `src/idf_component.yml`: espressif/esp_tinyusb ~1.4.4 with **espressif/tinyusb ~0.15.0** (the default 0.21 doesn't match esp_tinyusb 1.4). `managed_components/` and `dependencies.lock` are generated.
+- **Entered and left by reboot** (one-shot NVS flag `usbboot`, cleared when read, so a crash always ends in a normal boot). Runtime switching between the USB-Serial-JTAG and the OTG controller failed three ways: the USJ reset the chip (ESP_RST_USB), deleting the USJ PHY left the pad pull override on with no D+ pull-up (PC saw nothing), and an interrupt-watchdog.
+- USB-mode boot: no sd_mount; `sd_usb_start()` inits the card raw, sets RTC_CNTL_USB_RESET_DISABLE | IO_MUX_RESET_DISABLE (otherwise the USJ resets the chip when the port is taken), installs TinyUSB. Exit = `tud_disconnect()` + `esp_restart()`.
+- Normal boot: `sd_usb_boot_init()` routes the port back to the USJ if RTC still says OTG (a soft reset keeps the routing) and clears the reset-disable bits (esptool auto-reset needs them).
+- **CONFIG_TINYUSB_MSC_BUFSIZE must stay 512.** 8192 hung the USB IN interrupt on the first disk read (INT WDT, `_xt_medint3` over `proc_read10_cmd` -> `usbd_edpt_xfer`). TINYUSB_DEBUG_LEVEL 0.
+- **Crash diagnostics** (main.c): every log line is copied into an RTC_NOINIT ring; `esp_panic_handler` is wrapped (`-Wl,--wrap=esp_panic_handler` in platformio.ini) to append the panic reason + backtrace. On the next boot a log that reached USB mode is saved as `/sdcard/crashlog.txt`, and that file is printed line by line ~6 s after every boot (USJ drops bursts). Read it with `tools/serlog.py COM9 25 reset`, decode with `xtensa-esp32s3-elf-addr2line -pfiaC -e .pio/build/jc3248w535/firmware.elf <addrs>`.
 
 ## Tools and troubleshooting (2026-11-15)
 - **Screenshot:** long-press the header path -> `lvgl_port_save_screenshot()` writes `/sdcard/screenshot.bmp` (480x320, 24-bit) from the shadow frame buffer. `images/lcd-preview.jpg` is a real screenshot placed in a device frame (render script was a one-off Pillow job).

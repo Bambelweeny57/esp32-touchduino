@@ -34,6 +34,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "ff.h"
 
@@ -84,7 +85,8 @@ static tape_state_t s_last_state = TAPE_STOPPED;
 static lv_img_dsc_t *s_cover_img = NULL;
 
 // Widgets
-static lv_obj_t *scr_main, *scr_settings;
+static lv_obj_t *scr_main, *scr_settings, *scr_usb;
+static lv_obj_t *sw_usb, *lbl_usb_state, *lbl_usb_hint;
 static lv_obj_t *lbl_path, *lbl_rem, *list;
 static lv_obj_t *tv_frame, *tv_screen, *img_cover, *badge, *badge_lbl, *badge_stripes[4], *placeholder_lbl;
 static lv_obj_t *lbl_name, *lbl_info;
@@ -501,7 +503,7 @@ static void show_cover_image(lv_img_dsc_t *img, System frame_sys)
 // ---------------------------------------------------------------------------
 // Worker task (core 0): directory scans and cover decoding
 
-enum JobType { JOB_SCAN, JOB_COVER, JOB_REMOUNT };
+enum JobType { JOB_SCAN, JOB_COVER, JOB_REMOUNT, JOB_USB_REBOOT, JOB_USB_ON, JOB_USB_OFF };
 struct Job {
     JobType type;
     char path[256];      // directory for SCAN, file (or dir) for COVER
@@ -629,6 +631,20 @@ static void do_cover(const Job &j, uint32_t seq)
     if (img) cover_free(img);   // superseded by a newer request
 }
 
+// Stop playback (if any) so no file is open on the card
+static void stop_tape_and_wait(void)
+{
+    tape_status_t st;
+    tape_get_status(&st);
+    if (st.state == TAPE_STOPPED) return;
+    tape_stop();
+    for (int i = 0; i < 40; i++) {      // up to ~1 s
+        vTaskDelay(pdMS_TO_TICKS(25));
+        tape_get_status(&st);
+        if (st.state == TAPE_STOPPED) break;
+    }
+}
+
 static void worker_task(void *arg)
 {
     Job j;
@@ -639,18 +655,23 @@ static void worker_task(void *arg)
             do_scan(j);
         } else if (j.type == JOB_REMOUNT) {
             // Stop playback so no file is open on the card, then remount
-            tape_status_t st;
-            tape_get_status(&st);
-            if (st.state != TAPE_STOPPED) {
-                tape_stop();
-                for (int i = 0; i < 40; i++) {      // up to ~1 s
-                    vTaskDelay(pdMS_TO_TICKS(25));
-                    tape_get_status(&st);
-                    if (st.state == TAPE_STOPPED) break;
-                }
-            }
+            stop_tape_and_wait();
             sd_remount();
             do_scan(j);    // falls back to the card root if the folder has gone
+        } else if (j.type == JOB_USB_REBOOT) {
+            stop_tape_and_wait();
+            sd_usb_request_boot();
+            vTaskDelay(pdMS_TO_TICKS(300));   // let "Restarting..." show
+            esp_restart();
+        } else if (j.type == JOB_USB_ON) {
+            // This boot is for USB mode: hand the card to the PC
+            bool ok = sd_usb_start();
+            bsp_display_lock(0);
+            lv_label_set_text(lbl_usb_state, ok ? "Waiting for the PC..."
+                                                : "No SD card found: press Exit, insert a card and try again");
+            bsp_display_unlock();
+        } else if (j.type == JOB_USB_OFF) {
+            sd_usb_exit();     // reboots into normal TouchDuino (card mounted, COM port back)
         } else {
             uint32_t seq = (uint32_t)j.select;
             // Drop stale cover jobs if newer ones are queued
@@ -1196,6 +1217,18 @@ static lv_obj_t *settings_switch(lv_obj_t *parent, const char *title, const char
     return sw;
 }
 
+static void usb_switch_cb(lv_event_t *e)
+{
+    if (!lv_obj_has_state(sw_usb, LV_STATE_CHECKED)) return;   // leaving is done with Exit
+    settings_from_widgets();
+    settings_save(&s_settings);
+    lv_label_set_text(lbl_usb_hint, "Restarting into USB mode...");
+    Job j = {};
+    j.type = JOB_USB_REBOOT;
+    strncpy(j.path, s_dir.c_str(), sizeof(j.path) - 1);
+    xQueueSend(s_jobs, &j, 0);
+}
+
 static void build_settings(void)
 {
     scr_settings = lv_obj_create(NULL);
@@ -1264,6 +1297,85 @@ static void build_settings(void)
     sw_pol = settings_switch(body, "Polarity / TSX accel / UEF parity", "MaxDuino multi-purpose flag");
     sw_gaps = settings_switch(body, "Shorten long gaps", "Gaps over 5 s play as 5 s. Turn off if a game fails");
     sw_skip2a = settings_switch(body, "Skip TZX block 2A", "Ignore 'stop tape if 48K' blocks");
+
+    // USB file transfer: not a saved setting, it switches straight into the mode
+    lv_obj_t *ur = settings_row(body, LV_SYMBOL_USB "  USB file transfer", NULL);
+    lbl_usb_hint = lv_label_create(ur);
+    lv_label_set_text(lbl_usb_hint, "Use the SD card as a USB drive on the PC");
+    lv_obj_set_style_text_font(lbl_usb_hint, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl_usb_hint, lv_color_hex(0x9aa8c0), 0);
+    lv_obj_align(lbl_usb_hint, LV_ALIGN_TOP_LEFT, 0, 22);
+    sw_usb = lv_switch_create(ur);
+    lv_obj_set_size(sw_usb, 64, 34);
+    lv_obj_align(sw_usb, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(sw_usb, usb_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+}
+
+// ---------------------------------------------------------------------------
+// USB file transfer screen
+
+static void usb_exit_cb(lv_event_t *e)
+{
+    lv_label_set_text(lbl_usb_state, "Restarting TouchDuino...");
+    Job j = {};
+    j.type = JOB_USB_OFF;
+    strncpy(j.path, s_dir.c_str(), sizeof(j.path) - 1);
+    xQueueSend(s_jobs, &j, 0);
+}
+
+static void usb_timer_cb(lv_timer_t *t)
+{
+    static int last = -1;
+    if (lv_scr_act() != scr_usb || !sd_usb_active()) { last = -1; return; }
+    int now = sd_usb_host_connected() ? 1 : 0;
+    if (now == last) return;
+    last = now;
+    lv_label_set_text(lbl_usb_state, now ? LV_SYMBOL_OK "  Connected: the card is a drive on the PC"
+                                         : "Waiting for the PC...");
+}
+
+static void build_usb(void)
+{
+    scr_usb = lv_obj_create(NULL);
+    lv_obj_add_style(scr_usb, &st_screen, 0);
+    lv_obj_clear_flag(scr_usb, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *hdr = glass_panel(scr_usb, 4, 4, 472, 46);
+    lv_obj_t *t = lv_label_create(hdr);
+    lv_label_set_text(t, LV_SYMBOL_USB "  USB file transfer");
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, 4, 0);
+
+    lv_obj_t *p = glass_panel(scr_usb, 4, 56, 472, 180);
+    lbl_usb_state = lv_label_create(p);
+    lv_obj_set_style_text_font(lbl_usb_state, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lbl_usb_state, lv_color_hex(0x46d8ff), 0);
+    lv_label_set_text(lbl_usb_state, "Waiting for the PC...");
+    lv_obj_align(lbl_usb_state, LV_ALIGN_TOP_LEFT, 8, 8);
+    lv_obj_t *info = lv_label_create(p);
+    lv_obj_set_width(info, 448);
+    lv_label_set_long_mode(info, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(info,
+        "The SD card shows up on the PC as a USB drive: copy, delete and "
+        "rename files and folders as usual.\n\n"
+        "Tape playback is off in this mode, and the COM port is gone "
+        "until you exit.\n\n"
+        "Eject the drive on the PC, then press Exit: TouchDuino restarts "
+        "and reads the card again.");
+    lv_obj_align(info, LV_ALIGN_TOP_LEFT, 8, 40);
+
+    lv_obj_t *ex = lv_btn_create(scr_usb);
+    lv_obj_set_size(ex, 220, 64);
+    style_btn(ex, 0x3a8ef0, 0x1d4fa8);
+    lv_obj_set_style_radius(ex, 14, 0);
+    lv_obj_align(ex, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_add_event_cb(ex, usb_exit_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *el = lv_label_create(ex);
+    lv_label_set_text(el, LV_SYMBOL_CLOSE "  Exit");
+    lv_obj_set_style_text_font(el, &lv_font_montserrat_20, 0);
+    lv_obj_center(el);
+
+    lv_timer_create(usb_timer_cb, 300, NULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -1436,7 +1548,7 @@ static void build_main(void)
     btn_next = make_btn(row, LV_SYMBOL_NEXT, B_NEXT, g_top, g_bot);
 }
 
-extern "C" void ui_init(const tape_settings_t *settings, const char *start_dir)
+extern "C" void ui_init(const tape_settings_t *settings, const char *start_dir, bool usb_mode)
 {
     s_settings = *settings;
     lv_disp_t *disp = lv_disp_get_default();
@@ -1450,6 +1562,7 @@ extern "C" void ui_init(const tape_settings_t *settings, const char *start_dir)
     init_styles();
     build_main();
     build_settings();
+    build_usb();
     lv_scr_load(scr_main);
 
     s_jobs = xQueueCreate(8, sizeof(Job));
@@ -1459,5 +1572,14 @@ extern "C" void ui_init(const tape_settings_t *settings, const char *start_dir)
     lv_timer_create(anim_timer_cb, ANIM_PERIOD_MS, NULL);
 
     std::string dir = start_dir && strncmp(start_dir, SD_MOUNT, strlen(SD_MOUNT)) == 0 ? start_dir : SD_MOUNT;
+    if (usb_mode) {
+        s_dir = dir;
+        lv_label_set_text(lbl_usb_state, "Starting USB drive...");
+        lv_scr_load(scr_usb);
+        Job j = {};
+        j.type = JOB_USB_ON;
+        xQueueSend(s_jobs, &j, 0);
+        return;
+    }
     request_scan(dir);
 }
