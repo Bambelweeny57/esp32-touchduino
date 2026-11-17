@@ -121,6 +121,9 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - The last block of a file self-checks as "N+15 bytes, 7 stray bits, 0-half 10.." because upstream's IDEOF flush toggles the pin every 10 us (255 times) straight after the data. Harmless (the ROM has stopped reading); the TZXduino does the same. Could make the self-check ignore pulses < 100 us.
 - The earlier Decathlon "stopped at 50%" was never reproduced (likely a loose breadboard wire). Decathlon plays on into Day 2 after Day 1; the game ignores it.
 - README now documents the LM386 circuit and the self-check; `images/line-out.png` (no amp) is kept as the REM/plain-filter reference.
+- 2026-11-17: the user's ready-made LM386 module boards work with R1 removed (gain 20 instead of 200): 48K (Manic, Decathlon) and 128K (D.N.A. Warrior, Monty, Marauder TZX) all load, self-check all OK.
+- Start-of-play "underruns 1" (harmless: silence before the pilot): the ISR played the start-up holds during the block-table scan (100+ ms) and then swapped to a half-filled page. Fixed in do_play(): the ISR is held (isStopped) during the scan, and the first write page is filled before it is released (UniLoop() clears isStopped, so it is set again after each call; drain_tape() is skipped while isStopped). Verified on D.N.A. Warrior: underruns 0 for the whole load.
+- CPC 464 test blocked by the machine: "Memory full" at block 1 even on the TZXduino; the spare CPC board has the wrong keyboard connector. Retry when the machine is fixed (CDT uses the TZX path).
 - Next: BBC, MSX and Oric.
 
 ## Spectrum loading screens (2026-11-15)
