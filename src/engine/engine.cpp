@@ -276,7 +276,13 @@ static tape_settings_t s_settings;
 static volatile tape_status_t s_status;
 static bool s_last_motor = true;
 
-static bool motor_line_on(void) { return gpio_get_level((gpio_num_t)TAPE_MOTOR_GPIO) == 0; }
+// REM: by default the computer's motor contact closing pulls IO18 low = play.
+// "REM invert" (Options) is for machines whose line works the other way round.
+static bool motor_line_on(void)
+{
+    bool low = gpio_get_level((gpio_num_t)TAPE_MOTOR_GPIO) == 0;
+    return s_settings.rem_invert ? !low : low;
+}
 
 static void apply_settings(const tape_settings_t *s)
 {

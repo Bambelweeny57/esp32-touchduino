@@ -91,6 +91,7 @@ static lv_obj_t *lbl_path, *lbl_rem, *list;
 static lv_obj_t *tv_frame, *tv_screen, *img_cover, *badge, *badge_lbl, *badge_stripes[4], *placeholder_lbl;
 static lv_obj_t *lbl_name, *lbl_info;
 static lv_obj_t *bar_prog, *lbl_status, *lbl_play;
+static lv_obj_t *sw_reminv;
 static lv_obj_t *bm_baud, *sw_motor, *sw_pol, *sw_skip2a, *sw_gaps, *sw_spk, *sl_vol, *lbl_vol;
 
 // Styles
@@ -1138,6 +1139,7 @@ static void settings_from_widgets(void)
     uint16_t b = lv_btnmatrix_get_selected_btn(bm_baud);
     if (b < 5) s_settings.baud = baud_vals[b];
     s_settings.motor_auto = lv_obj_has_state(sw_motor, LV_STATE_CHECKED);
+    s_settings.rem_invert = lv_obj_has_state(sw_reminv, LV_STATE_CHECKED);
     s_settings.polarity = lv_obj_has_state(sw_pol, LV_STATE_CHECKED);
     s_settings.skip2a = lv_obj_has_state(sw_skip2a, LV_STATE_CHECKED);
     s_settings.short_gaps = lv_obj_has_state(sw_gaps, LV_STATE_CHECKED);
@@ -1156,6 +1158,7 @@ static void settings_to_widgets(void)
         }
     }
     if (s_settings.motor_auto) lv_obj_add_state(sw_motor, LV_STATE_CHECKED); else lv_obj_clear_state(sw_motor, LV_STATE_CHECKED);
+    if (s_settings.rem_invert) lv_obj_add_state(sw_reminv, LV_STATE_CHECKED); else lv_obj_clear_state(sw_reminv, LV_STATE_CHECKED);
     if (s_settings.polarity) lv_obj_add_state(sw_pol, LV_STATE_CHECKED); else lv_obj_clear_state(sw_pol, LV_STATE_CHECKED);
     if (s_settings.skip2a) lv_obj_add_state(sw_skip2a, LV_STATE_CHECKED); else lv_obj_clear_state(sw_skip2a, LV_STATE_CHECKED);
     if (s_settings.short_gaps) lv_obj_add_state(sw_gaps, LV_STATE_CHECKED); else lv_obj_clear_state(sw_gaps, LV_STATE_CHECKED);
@@ -1272,6 +1275,7 @@ static void build_settings(void)
     lv_obj_add_event_cb(bm_baud, setting_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     sw_motor = settings_switch(body, "Motor: Auto REM", "On: REM jack pauses/plays. Off: force run");
+    sw_reminv = settings_switch(body, "REM invert", "Off: contact closed = play. On: open = play");
     sw_spk = settings_switch(body, "Onboard speaker", "Hear the tape signal on the speaker");
 
     r = settings_row(body, "Speaker volume", NULL);

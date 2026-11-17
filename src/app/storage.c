@@ -220,6 +220,7 @@ void settings_load(tape_settings_t *s, char *last_dir, int last_dir_len)
 {
     s->baud = 3850;
     s->motor_auto = false;
+    s->rem_invert = false;  // contact closed = play
     s->polarity = false;
     s->skip2a = true;      // ignore TZX ID2A "stop if 48K": wrong for 128K games
     s->short_gaps = true;  // gaps over 5 s play as 5 s (TZX transfers often contain long blank tape)
@@ -233,6 +234,7 @@ void settings_load(tape_settings_t *s, char *last_dir, int last_dir_len)
     uint8_t u8;
     if (nvs_get_u16(h, "baud", &u16) == ESP_OK) s->baud = u16;
     if (nvs_get_u8(h, "motor", &u8) == ESP_OK) s->motor_auto = u8;
+    if (nvs_get_u8(h, "reminv", &u8) == ESP_OK) s->rem_invert = u8;
     if (nvs_get_u8(h, "pol", &u8) == ESP_OK) s->polarity = u8;
     if (nvs_get_u8(h, "skip2a", &u8) == ESP_OK) s->skip2a = u8;
     if (nvs_get_u8(h, "gaps", &u8) == ESP_OK) s->short_gaps = u8;
@@ -261,6 +263,7 @@ void settings_save(const tape_settings_t *s)
     if (!h) return;
     nvs_set_u16(h, "baud", s->baud);
     nvs_set_u8(h, "motor", s->motor_auto);
+    nvs_set_u8(h, "reminv", s->rem_invert);
     nvs_set_u8(h, "pol", s->polarity);
     nvs_set_u8(h, "skip2a", s->skip2a);
     nvs_set_u8(h, "gaps", s->short_gaps);
