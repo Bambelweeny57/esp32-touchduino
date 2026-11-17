@@ -129,6 +129,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - **REM invert** option (Options, NVS key `reminv`, `tape_settings_t.rem_invert`, default off = contact closed/IO18 low = play), applied in engine.cpp `motor_line_on()` (also drives the header REM indicator).
 - **REM verified on the MSX** (2.5 mm cable: tip -> IO18, sleeve -> GND; Auto REM on, REM invert off): MOTOR ON/OFF show REM play/pause in the header; during Chase H.Q. every relay change paused/resumed at the exact byte (296, 1456, 11310, 53488). Brief off/on blips of 2-6 ms happen (relay bounce or the loader flicking the motor): harmless, a ~20 ms debounce could be added if needed.
 - Chase H.Q. also loads at **2400 baud**. Its layout: BASIC loader, CM loader (1128), 9736 screen, 2x 21128 main, then 5x (8-byte stage header + 6904 data). After the main load it reads the next stage header (motor off/on) and shows "stop the tape and press any key" with the motor left ON: stage 1 is already in memory, so the user pauses (not stops) to park the tape at the next stage.
+- **MSX speeds** (Just for Fun MSX1): 1200 and 2400 baud load; **3600 and 3850 give "Device I/O error"** right after the first header (Found: then error; BASIC stops the motor and REM pauses TouchDuino). 3150 untested. Sorcery (EU).cas (Virgin: ASCII loader + 3 BLOAD files) loads at 2400 with REM off/on blips at each file (296, 16736, 30440). Use 2400 as the MSX default.
 - Next: BBC and Oric (Oric also good for REM).
 
 ## Spectrum loading screens (2026-11-15)
