@@ -38,7 +38,7 @@ It runs on the Guition **JC3248W535** board:
 - **Line out:** GPIO 17 outputs the signal for a 3.5 mm jack to the computer's EAR/tape input.
 - **Motor control (REM):** in **Auto REM**, the computer's motor line on GPIO 18 pauses and resumes playback, and the header shows **REM ▶** or **REM ❚❚**. In **Force run** the line is ignored and the header shows **RUN**.
 - **Options:**
-  - speed for TSX/CAS/CDT (1200–3850 baud);
+  - speed for TSX/CAS/CDT (1200–3850 baud). UEF files always play at the standard 1200 baud;
   - **Shorten long gaps** (on by default): gaps over 5 s in the file play as 5 s. TZX transfers often contain long stretches of blank tape, such as 35 s after a loading screen. Turn it off if a game ever fails to load;
   - **Skip TZX block 2A** (on by default): ignores "stop the tape if in 48K mode" markers, which would wrongly pause 128K games;
   - **REM invert** (off by default): off, a closed REM contact means play; turn it on for a machine whose motor line works the other way round;
@@ -141,7 +141,7 @@ python ~/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port CO
 ## Using it
 
 1. **Prepare the card.** Format a microSD card as FAT32 (FAT16 is fine for small cards) and copy your tape files onto it. Folders are fine, for example `/Spectrum/Games/Manic Miner.tzx`. Long file names work.
-   - UEF files must be uncompressed. Run `gunzip -c game.uef > game.uef.tmp` and rename the result back to `game.uef`.
+   - UEF files can be copied as they are: most archive UEFs (Stairway to Hell and others) are gzip-compressed, and TouchDuino unpacks them in memory when you press play.
 2. **Browse.** Tap a folder to open it, and ◀ (or `..`) to go back. ↻ re-reads the SD card: use it after swapping cards, since the board can't detect a card change by itself. It stops playback first.
 3. **Play.** Tap a file to select it and see its preview, then tap again or press ▶. ▶ toggles pause while playing and ■ stops. While a tape is playing or paused, browsing is locked and the preview stays on that tape: press ■ to choose another file. The status line shows **End of tape** when it finishes.
 4. **Skip blocks.** ◀◀ and ▶▶ jump between data blocks in TZX/TSX/CDT and Spectrum TAP files.
@@ -149,7 +149,7 @@ python ~/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port CO
    - **TZX images** often contain "stop the tape" markers, and TouchDuino pauses there; press ▶ when the game asks. "Stop if 48K" markers are ignored unless you turn off **Skip TZX block 2A**.
    - **TAP files** have no such markers and play straight through. Pause after a part has loaded and resume when the game asks for the next one, as you would with a real cassette.
 6. **Options.** The ⚙ screen (scroll it for more) holds:
-   - **Baud:** the speed for MSX CAS, TSX and CDT files. 2400 is the fastest our MSX loads; 3600 and 3850 gave "Device I/O error".
+   - **Baud:** the speed for MSX CAS, TSX and CDT files. 2400 is the fastest our MSX loads; 3600 and 3850 gave "Device I/O error". UEF files ignore it and always play at 1200, the speed a BBC or Electron expects.
    - **Motor: Auto REM:** on, the computer's REM line pauses and plays the tape; off, the tape plays straight through (Force run).
    - **REM invert:** off, a closed REM contact means play (correct for the MSX tested); turn it on if playback pauses when the motor should run.
    - **Onboard speaker**, **Speaker volume** and a **Test** beep.

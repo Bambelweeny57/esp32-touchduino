@@ -13,13 +13,15 @@ class TapeFile
   public:
     bool open(const char *path);
     void close();
-    bool isOpen() const { return f != NULL; }
+    bool isOpen() const { return f != NULL || mem != NULL; }
     bool seekSet(uint32_t pos);
     int read(void *buf, size_t n);
     uint32_t fileSize() const { return size; }
 
   private:
     bool fill(uint32_t pos);
+    bool open_gzip(FILE *src);
+    uint8_t *mem = NULL;      // whole unpacked file (gzip input), else NULL
     FILE *f = NULL;
     uint8_t *cache = NULL;
     uint32_t cache_pos = 0;   // file offset of cache[0]
