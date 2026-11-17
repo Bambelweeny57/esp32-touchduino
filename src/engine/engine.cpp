@@ -284,10 +284,16 @@ static bool motor_line_on(void)
     return s_settings.rem_invert ? !low : low;
 }
 
+// UEF (BBC/Electron/Atom) plays standard timing only at BAUDRATE 1200; any
+// other value switches MaxDuino's UEF code to its turbo pulses, which a stock
+// machine can't read ("Searching" forever). So a UEF always plays at 1200 and
+// the baud option only affects CAS / TSX / CDT.
+static bool s_force_1200 = false;
+
 static void apply_settings(const tape_settings_t *s)
 {
     s_settings = *s;
-    BAUDRATE = s->baud;
+    BAUDRATE = (start == 1 && s_force_1200) ? 1200 : s->baud;
     mselectMask = s->motor_auto;
     TSXCONTROLzxpolarityUEFSWITCHPARITY = s->polarity;
     skip2A = s->skip2a;
@@ -307,6 +313,8 @@ static void do_play(const char *path)
     fileName[255] = 0;
     const char *dot = strrchr(fileName, '.');
     if (!dot) { engine_message("No file extension"); return; }
+    s_force_1200 = !strcasecmp(dot + 1, "uef");
+    BAUDRATE = s_force_1200 ? 1200 : s_settings.baud;
 
     FILE *f = fopen(path, "rb");
     if (!f) { engine_message("Cannot open file"); return; }
@@ -317,6 +325,7 @@ static void do_play(const char *path)
     engine_message("Playing");
     pauseOn = false;
     UniPlay();                       // opens the file, detects format, starts the ISR
+    if (entry.isOpen()) filesize = entry.fileSize();   // a gzipped file plays at its unpacked size
     // Hold the ISR (it idles without using the buffer) while the block table is
     // scanned: a TZX scan takes 100+ ms, which used to play out both pages of
     // start-up holds and count an underrun. UniLoop() releases it (isStopped = pauseOn).

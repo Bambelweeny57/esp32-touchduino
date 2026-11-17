@@ -96,12 +96,14 @@ static char *s_clog_saved;   // copy of the previous boot's log tail
 static int s_clog_reason;
 
 // A few seconds after boot (the COM port takes a moment to come back after a
-// reset): a log that reached USB mode is saved to /sdcard/crashlog.txt, and
+// reset): a log that ended in a crash or reached USB mode is saved to /sdcard/crashlog.txt, and
 // that file is printed line by line (the USB-Serial-JTAG console drops bursts).
 static void crashlog_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(6000));
-    if (s_clog_saved && strstr(s_clog_saved, "USB mode")) {
+    bool crash = s_clog_reason == ESP_RST_PANIC || s_clog_reason == ESP_RST_INT_WDT ||
+                 s_clog_reason == ESP_RST_TASK_WDT || s_clog_reason == ESP_RST_WDT;
+    if (s_clog_saved && (crash || strstr(s_clog_saved, "USB mode"))) {
         FILE *f = fopen(SD_MOUNT "/crashlog.txt", "w");
         if (f) {
             fprintf(f, "reset reason %d\n%s\n", s_clog_reason, s_clog_saved);
