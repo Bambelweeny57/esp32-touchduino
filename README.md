@@ -98,7 +98,7 @@ Instead of building the amplifier, you can use one of the cheap **LM386 amplifie
   - **Amstrad CPC 664/6128:** the DIN tape socket. The CPC 464's built-in deck needs a cassette adaptor or a modification.
   - **BBC Micro:** the 7-pin DIN cassette socket.
   - **Commodore 64:** has no audio input, so it needs a datasette-port interface instead of this circuit.
-- **Motor sense (optional):** the computer's REM output is a switch (a relay contact) that closes while the motor should run. Wire it between GPIO 18 and GND. The pin has a pull-up, so closed means play. Select **Auto REM** in Options.
+- **Motor sense (optional):** the computer's REM output is a switch (a relay contact) that closes while the motor should run. Wire it between GPIO 18 and GND. The pin has a pull-up, so closed means play. Select **Auto REM** in Options. If a machine works the other way round (playback pauses when the motor should run), turn on **REM invert**: then an open contact means play.
 - **Auto REM without a cable:** with nothing on GPIO 18, Auto REM keeps playback paused. That's why the default is Force run.
 
 ## Real-machine tests
