@@ -41,6 +41,8 @@ It runs on the Guition **JC3248W535** board:
   - speed for TSX/CAS/CDT (1200–3850 baud);
   - **Shorten long gaps** (on by default): gaps over 5 s in the file play as 5 s. TZX transfers often contain long stretches of blank tape, such as 35 s after a loading screen. Turn it off if a game ever fails to load;
   - **Skip TZX block 2A** (on by default): ignores "stop the tape if in 48K mode" markers, which would wrongly pause 128K games;
+  - **REM invert** (off by default): off, a closed REM contact means play; turn it on for a machine whose motor line works the other way round;
+  - **USB file transfer:** the SD card appears on the PC as a USB drive, so files can be added without taking the card out;
   - MaxDuino's polarity/parity flag.
 
   Settings are kept after power-off.
