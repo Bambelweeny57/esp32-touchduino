@@ -14,7 +14,7 @@ It runs on the Guition **JC3248W535** board:
 
 *The screen is a real screenshot from the board, playing `MANIC.TAP` with its loading stripes in the preview border.*
 
-> **Status:** working. Browsing, cover art, playback and the speaker are tested on the board. Games load on a real ZX Spectrum 48K and 128K through the LM386 line-out stage (see [Real-machine tests](#real-machine-tests)). The BBC Micro, MSX and Oric are still to be tested.
+> **Status:** working. Browsing, cover art, playback, the speaker and USB file transfer are tested on the board. Games load on a real ZX Spectrum 48K and 128K, an MSX and a BBC Micro through an LM386 line-out stage, and REM motor control works on the MSX and the BBC (see [Real-machine tests](#real-machine-tests)). The Oric and Amstrad CPC are still to be tested.
 
 ## Features
 
@@ -98,23 +98,46 @@ Instead of building the amplifier, you can use one of the cheap **LM386 amplifie
 - **Different machines need different leads:**
   - **ZX Spectrum:** the EAR socket.
   - **Amstrad CPC 664/6128:** the DIN tape socket. The CPC 464's built-in deck needs a cassette adaptor or a modification.
-  - **BBC Micro:** the 7-pin DIN cassette socket.
+  - **BBC Micro:** the 7-pin DIN cassette socket (its motor relay pins give REM).
+  - **MSX:** the 8-pin DIN cassette socket (EAR in, plus the REMOTE relay pins for REM).
   - **Commodore 64:** has no audio input, so it needs a datasette-port interface instead of this circuit.
 - **Motor sense (optional):** the computer's REM output is a switch (a relay contact) that closes while the motor should run. Wire it between GPIO 18 and GND. The pin has a pull-up, so closed means play. Select **Auto REM** in Options. If a machine works the other way round (playback pauses when the motor should run), turn on **REM invert**: then an open contact means play.
 - **Auto REM without a cable:** with nothing on GPIO 18, Auto REM keeps playback paused. That's why the default is Force run.
 
 ## Real-machine tests
 
-Loaded through the LM386 stage, VR1 at the middle setting, board on PC USB power:
+Loaded through an LM386 stage (the circuit above, or a ready-made module at gain 20) with the volume at about the middle, board on PC USB power.
+
+**ZX Spectrum**
 
 | Game | Machine | File | Result |
 | --- | --- | --- | --- |
-| Manic Miner | ZX Spectrum 48K | TAP | Loads (2 out of 2) |
-| Daley Thompson's Decathlon | ZX Spectrum 48K | TAP, Day 1 + Day 2 on one tape | Loads (2 out of 2) |
+| Manic Miner | ZX Spectrum 48K | TAP | Loads (several runs) |
+| Daley Thompson's Decathlon | ZX Spectrum 48K | TAP, Day 1 + Day 2 on one tape | Loads (several runs) |
 | D.N.A. Warrior | ZX Spectrum 128K | TZX, 35 s gap shortened to 5 s | Loads |
 | Auf Wiedersehen Monty | ZX Spectrum 128K | TZX, blocks back to back | Loads |
 | Marauder | ZX Spectrum 128K | TZX, countdown loader | Loads |
 | Marauder | ZX Spectrum 128K | TAP | Hangs after loading, but TouchDuino sent every byte correctly: a modified TAP; the TZX works |
+
+**MSX** (a Just for Fun MSX1 kit, `RUN"CAS:"`)
+
+| Game | File | Result |
+| --- | --- | --- |
+| Chase H.Q. | CAS, custom loader, multi-load | Loads at 1200 and 2400 baud. REM pauses and resumes at the exact byte on every relay change |
+| Sorcery | CAS, BASIC loader + 3 files | Loads at 2400 baud. At 3600 and 3850: "Device I/O error" (too fast for this MSX) |
+| Choplift | CAS | Plays to the end, then the MSX reboots: the loader reprograms the memory slots for one particular MSX model (a cartridge conversion), not a tape fault |
+
+**BBC Micro** (Model B with a PiTube 6502 co-processor, `CHAIN""`)
+
+| Game | File | Result |
+| --- | --- | --- |
+| Chuckie Egg | UEF, as downloaded (gzip-compressed) | Loads. REM pauses while the loader runs and between blocks, resuming at the exact byte |
+
+**Not tested yet:** Amstrad CPC (the test machine shows "Memory full" even with a TZXduino, so it needs repairing first) and Oric Atmos.
+
+Machine notes:
+- **MSX:** start at Baud **2400** (or 1200). Faster settings may give "Device I/O error". Some multi-load games say "stop the tape" while leaving the motor on: press ❚❚, not ■, so the tape stays at the next level.
+- **BBC Micro:** UEF files always play at 1200 baud, whatever the Baud setting. Downloaded UEFs can be copied straight to the card.
 
 **Self-check:** while a tape plays, TouchDuino decodes its own output the way the Spectrum ROM does. For each standard-speed block, the serial log shows a line like
 `selfcheck block 5: 32770 bytes, flag 0xFF, parity OK, ... 0-half 244..244 us, 1-half 489..489 us`.
