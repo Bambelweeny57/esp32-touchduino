@@ -90,7 +90,7 @@ void stopFile()
     // Also called by the engine itself at the end of the tape, or when it hits
     // a block it can't play: leave a message so the UI doesn't keep "Playing".
     bool was_playing = start == 1;
-    if (was_playing && !s_user_stop && !pauseOn) drain_tape();
+    if (was_playing && !s_user_stop && !pauseOn && !isStopped) drain_tape();
     byte id = currentID;
     unsigned long pos = bytesRead, size = filesize;
     UniStop();
@@ -311,8 +311,25 @@ static void do_play(const char *path)
     engine_message("Playing");
     pauseOn = false;
     UniPlay();                       // opens the file, detects format, starts the ISR
+    // Hold the ISR (it idles without using the buffer) while the block table is
+    // scanned: a TZX scan takes 100+ ms, which used to play out both pages of
+    // start-up holds and count an underrun. UniLoop() releases it (isStopped = pauseOn).
+    isStopped = true;
     start = 1;
     build_block_table(path, dot + 1);
+    // Fill the first write page before the ISR is released, so the first page
+    // swap always finds real data (it used to find a half-filled page: harmless
+    // silence before the pilot, but it showed as an underrun). UniLoop() releases
+    // the ISR each time it runs, so hold it again after every call.
+    noInterrupts();
+    writepos = 0;
+    morebuff = false;
+    interrupts();
+    for (int i = 0; i < 20000 && start == 1 && writepos < buffsize; i++) {
+        UniLoop();
+        isStopped = true;
+    }
+    isStopped = pauseOn;
 
     s_last_motor = true;             // as MaxDuino: start paused if REM says stop
     ESP_LOGI(TAG, "play %s (%lu bytes)", path, (unsigned long)filesize);

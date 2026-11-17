@@ -81,6 +81,16 @@ GPIO 17 on its own is too quiet for a real Spectrum: the loading tones were bare
 - **Power:** the LM386 runs from **+5 V on the VIN pin of the UART connector** (USB power). Check it with a meter first; the 3.3 V pin is not enough.
 - **Plug:** jack **tip** carries the signal and **sleeve** goes to GND. With a stereo cable, joining tip and ring is fine.
 - **Volume:** start with VR1 low and turn it up until the computer loads reliably, like the volume on a tape deck.
+
+#### Easier option: a ready-made LM386 module
+
+Instead of building the amplifier, you can use one of the cheap **LM386 amplifier module** boards sold for small speakers. They have the LM386, its capacitors and a volume pot on a small PCB.
+
+- **Set the gain to 20:** most modules ship at gain 200, set by a part between pins 1 and 8 of the chip (marked R1 on the board tested). Remove it to leave pins 1 and 8 open, which gives gain 20 as in the circuit above. At 200 the signal is far too loud.
+- **Wiring:** module **VCC** to +5 V (VIN on the UART connector), **GND** to GND, the module **input** straight to IO17 (no filter needed in front), and the module **output** to the jack tip, with its ground to the sleeve.
+- **Volume:** the module's own pot replaces VR1. The middle of its travel loaded every test game.
+- Tested on a ZX Spectrum 48K (Manic Miner, Decathlon) and 128K (D.N.A. Warrior, Auf Wiedersehen Monty, Marauder).
+
 - **Without the amplifier:** the plain RC filter in [images/line-out.png](images/line-out.png) (the same parts up to C2, with a 4.7 kΩ resistor to ground) is enough for a scope or a quiet test, but not for the Spectrum we tried.
 - **Don't connect a speaker straight to GPIO 17.** Use the board's speaker connector to listen. Don't use the speaker connector as a line out either: the onboard amplifier is a bridged class-D output, so neither speaker terminal is ground.
 - **Different machines need different leads:**
