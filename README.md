@@ -14,7 +14,7 @@ It runs on the Guition **JC3248W535** board:
 
 *The screen is a real screenshot from the board, playing `MANIC.TAP` with its loading stripes in the preview border.*
 
-> **Status:** working. Browsing, cover art, playback, the speaker and USB file transfer are tested on the board. Games load on a real ZX Spectrum 48K and 128K, an MSX and a BBC Micro through an LM386 line-out stage, and REM motor control works on the MSX and the BBC (see [Real-machine tests](#real-machine-tests)). The Oric and Amstrad CPC are still to be tested.
+> **Status:** working. Browsing, cover art, playback, the speaker and USB file transfer are tested on the board. Games load on a real ZX Spectrum 48K and 128K, an MSX and a BBC Micro through an LM386 line-out stage, and REM motor control works on the MSX and the BBC (see [Real-machine tests](#real-machine-tests)). The Oric, Amstrad CPC and ZX81 are still to be tested.
 
 ## Features
 
@@ -61,6 +61,10 @@ It runs on the Guition **JC3248W535** board:
 GPIO 17 and 18 are on the 4-pin expansion connectors (GND, 3.3V, IO17, IO18).
 
 <img src="images/connectors.png" alt="ESP32-Touchduino JC3248W535 Pinout " width="400">
+
+### Case
+
+A 3D-printable case is in [case/](case/) (`Case_JC3248W535C.3mf` and `.stl`). The board sits in it turned 180 degrees, so the firmware draws the screen that way round (`APP_DISPLAY_ROTATION` = `LV_DISP_ROT_270` in `src/main.c`). For a bare board with the USB port on the other side, set it back to `LV_DISP_ROT_90`.
 
 ### Wiring the tape output
 
@@ -133,7 +137,7 @@ Loaded through an LM386 stage (the circuit above, or a ready-made module at gain
 | --- | --- | --- |
 | Chuckie Egg | UEF, as downloaded (gzip-compressed) | Loads. REM pauses while the loader runs and between blocks, resuming at the exact byte |
 
-**Not tested yet:** Amstrad CPC (the test machine shows "Memory full" even with a TZXduino, so it needs repairing first) and Oric Atmos.
+**Not tested yet:** Amstrad CPC (the test machine shows "Memory full" even with a TZXduino, so it needs repairing first), Oric Atmos and ZX81.
 
 Machine notes:
 - **MSX:** start at Baud **2400** (or 1200). Faster settings may give "Device I/O error". Some multi-load games say "stop the tape" while leaving the motor on: press ❚❚, not ■, so the tape stays at the next level.

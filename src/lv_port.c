@@ -212,9 +212,9 @@ lv_disp_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
         buff_caps = MALLOC_CAP_SPIRAM;
     }
 
-    /* TouchDuino: shadow-buffer mode for 90 degree rotation (see shadow_fb) */
+    /* TouchDuino: shadow-buffer mode for 90 / 270 degree rotation (see shadow_fb) */
     uint32_t draw_buf_px = disp_cfg->buffer_size;
-    if (disp_ctx->sw_rotate == LV_DISP_ROT_90 && disp_ctx->trans_size) {
+    if ((disp_ctx->sw_rotate == LV_DISP_ROT_90 || disp_ctx->sw_rotate == LV_DISP_ROT_270) && disp_ctx->trans_size) {
         disp_ctx->shadow_fb = heap_caps_calloc(disp_cfg->hres * disp_cfg->vres, sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
         if (disp_ctx->shadow_fb) {
             draw_buf_px = disp_cfg->hres * 40;                 /* 40 lines, internal RAM: fast to draw into */
@@ -410,10 +410,12 @@ bool lvgl_port_save_screenshot(const char *path)
     fwrite(hdr, 1, sizeof(hdr), f);
 
     static uint8_t row[480 * 3];
+    const bool r270 = ctx->sw_rotate == LV_DISP_ROT_270;
     for (int ly = H - 1; ly >= 0; ly--) {
         for (int lx = 0; lx < W; lx++) {
-            /* logical (lx, ly) is native (nx = H-1-ly, ny = lx) in the shadow */
-            lv_color32_t c = { .full = lv_color_to32(ctx->shadow_fb[lx * H + (H - 1 - ly)]) };
+            /* logical (lx, ly) in the native shadow: 90 -> (H-1-ly, lx), 270 -> (ly, W-1-lx) */
+            int idx = r270 ? (W - 1 - lx) * H + ly : lx * H + (H - 1 - ly);
+            lv_color32_t c = { .full = lv_color_to32(ctx->shadow_fb[idx]) };
             row[lx * 3 + 0] = c.ch.blue;
             row[lx * 3 + 1] = c.ch.green;
             row[lx * 3 + 2] = c.ch.red;
@@ -492,7 +494,7 @@ static bool lvgl_port_flush_ready_callback(esp_lcd_panel_io_handle_t panel_io, e
 #endif
 
 /* TouchDuino: copy a dirty area (logical landscape) into the native-orientation
- * shadow, rotating 90 degrees; on the last area of a refresh, stream the whole
+ * shadow, rotating 90 or 270 degrees; on the last area of a refresh, stream the whole
  * shadow to the panel from row 0 in trans_size chunks (double-buffered DMA). */
 static void lvgl_port_shadow_flush(lvgl_port_display_ctx_t *disp_ctx, lv_disp_drv_t *drv,
                                    const lv_area_t *area, const lv_color_t *color_map)
@@ -503,12 +505,23 @@ static void lvgl_port_shadow_flush(lvgl_port_display_ctx_t *disp_ctx, lv_disp_dr
     const int h = area->y2 - area->y1 + 1;
     lv_color_t *fb = disp_ctx->shadow_fb;
 
-    /* logical (lx, ly) -> native (nx = nw-1-ly, ny = lx); write native rows contiguously */
-    for (int lx = area->x1; lx <= area->x2; lx++) {
-        lv_color_t *dst = fb + lx * nw + (nw - 1 - area->y1);
-        const lv_color_t *src = color_map + (lx - area->x1);
-        for (int ly = 0; ly < h; ly++) {
-            *(dst - ly) = src[ly * w];
+    if (disp_ctx->sw_rotate == LV_DISP_ROT_270) {
+        /* logical (lx, ly) -> native (nx = ly, ny = nh-1-lx) (the board turned 180 degrees) */
+        for (int lx = area->x1; lx <= area->x2; lx++) {
+            lv_color_t *dst = fb + (nh - 1 - lx) * nw + area->y1;
+            const lv_color_t *src = color_map + (lx - area->x1);
+            for (int ly = 0; ly < h; ly++) {
+                dst[ly] = src[ly * w];
+            }
+        }
+    } else {
+        /* logical (lx, ly) -> native (nx = nw-1-ly, ny = lx); write native rows contiguously */
+        for (int lx = area->x1; lx <= area->x2; lx++) {
+            lv_color_t *dst = fb + lx * nw + (nw - 1 - area->y1);
+            const lv_color_t *src = color_map + (lx - area->x1);
+            for (int ly = 0; ly < h; ly++) {
+                *(dst - ly) = src[ly * w];
+            }
         }
     }
 
