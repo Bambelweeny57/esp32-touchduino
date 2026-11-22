@@ -146,7 +146,9 @@ static void crashlog_init(void)
     s_prev_vprintf = esp_log_set_vprintf(crashlog_vprintf);
 }
 
-#define APP_DISPLAY_ROTATION    LV_DISP_ROT_90   // landscape 480x320
+// Landscape 480x320. LV_DISP_ROT_270 = the board turned 180 degrees from the
+// original LV_DISP_ROT_90 orientation, to suit the printed case (case/).
+#define APP_DISPLAY_ROTATION    LV_DISP_ROT_270
 
 void app_main(void)
 {

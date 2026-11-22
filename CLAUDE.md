@@ -15,7 +15,8 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 ## Layout
 | Path | What |
 | --- | --- |
-| `src/main.c` | NVS settings -> tape engine start -> SD mount -> display (LVGL pinned core 0) -> `ui_init` |
+| `src/main.c` | Crash log, USB-mode boot check, NVS settings -> tape engine start -> SD mount -> display (LVGL pinned core 0, `APP_DISPLAY_ROTATION` = LV_DISP_ROT_270) -> `ui_init` |
+| `case/` | User's 3D-printed case (`Case_JC3248W535C.3mf` / `.stl`); the board sits turned 180 degrees in it, hence ROT_270 |
 | `src/esp_bsp.*`, `esp_lcd_*`, `lv_port.*`, `lv_conf.h` | Board support copied from NorthernMan54/JC3248W535EN (display, touch, LVGL glue) |
 | `src/engine/` | MaxDuino engine. Most `.cpp/.h` are **copied verbatim** from upstream (`MaxProcessing`, `isr`, `casProcessing`, `uef`, `oric`, `kansas_4b`, `zx8081`, `ayplay`, `mzf`, `mtx`, `caq`, `c64tap`, `CheckForExt`, ...) |
 | `src/engine/Arduino.h` | Arduino shim (byte/word, bitRead, PROGMEM no-ops, `noInterrupts` = core-1 critical section) |
@@ -37,7 +38,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - `casProcessing.cpp`: fixed upstream bug `for (byte i=9; i>=0; --i)` (infinite loop) -> `int`
 
 ## Decisions
-- Sound: the user wants audio **out of the onboard speaker** (small speaker on the board's speaker connector). That's the I2S monitor, on by default, volume in Options. GPIO17 still outputs the line-level signal for a 3.5 mm jack (needs an RC filter; never drive a speaker directly from GPIO17).
+- Sound: the user wants audio **out of the onboard speaker** (small speaker on the board's speaker connector). That's the I2S monitor, on by default, volume in Options. GPIO17 outputs the tape signal for the 3.5 mm jack through an **LM386 stage at gain 20** (`images/line-out-lm386.png`, or a ready-made LM386 module with the pin 1-8 part removed, fed straight from GPIO17). The plain RC filter (`images/line-out.png`) is too quiet for a real Spectrum. Never drive a speaker directly from GPIO17.
 - Motor default is **Force run** (`DEFAULT_MSELECTMASK 0`) because GPIO18 floats high (pull-up) with nothing connected, which would pause playback.
 - Block skip uses a pre-scan table (TZX/TSX/CDT and Spectrum/Jupiter TAP). 0x12/0x13 runs are grouped with the following data block.
 - MaxDuino has no LICENSE file upstream; keep attribution in sources.
@@ -56,7 +57,13 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - [x] Speaker test beep and .tap playback through the speaker verified by user 2026-11-15
 - [x] TAP/TZX playback on the board, speaker, UI confirmed by user
 - [x] Loads on a real ZX Spectrum 48K and 128K through the LM386 stage (2026-11-16, see "Real Spectrum tests")
-- [ ] BBC Micro, MSX, Oric; REM tests (Oric and MSX) when the 2.5 mm sockets arrive
+- [x] MSX loads (CAS, up to 2400 baud) and BBC Model B loads (UEF, compressed files too) (2026-11-17)
+- [x] REM motor control verified on the MSX and the BBC (2.5 mm cable: tip -> IO18, sleeve -> GND); REM invert option added
+- [x] USB file transfer mode (2026-11-16)
+- [x] Display turned 180 degrees (LV_DISP_ROT_270) for the printed case; picture and touch verified by the user 2026-11-22
+- [ ] Amstrad CPC 464 (machine needs checking first: "Memory full" even on a TZXduino)
+- [ ] Oric Atmos (also a good REM test: the relay can be seen and heard)
+- [ ] ZX81 (see "ZX81 and ZON-X ideas")
 
 ## Gotchas
 - ESP-IDF builds with -Werror=switch etc.; upstream engine files get relaxed warnings in `src/CMakeLists.txt` (only `src/engine/*.cpp`)
@@ -105,11 +112,10 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - **Long gaps:** TZX block pauses come straight from the file (DNA Warrior has a 35 s gap after its loading screen and 52 s at the end; an Android player shortens them). Option **Shorten long gaps** (default on, NVS key `gaps`) caps them at 5 s via `maxGapMs` in MaxProcessing.cpp's IDPAUSE handler.
 - Engine logs each TZX data block's gap at play (`id 0x10 @ off: N bytes, then X ms gap`) and any stop markers. Block/ID transitions are sampled every 50 ms, so short IDPAUSE states are not logged.
 
-## Next: real-machine tests (planned from 2026-11-16)
-- 3.5 mm connectors (panel-mount + socket-to-bare-wire for the prototype) arriving 2026-11-16; 2.5 mm REM panel sockets arriving Tuesday 2026-11-17.
-- Machines available: ZX Spectrum, BBC Micro, MSX, Oric Atmos (a scratch-built one, so the REM relay can be seen and heard; the MSX REM relay is audible too). The Oric and MSX are the best REM test machines.
-- Build the line-out filter from `images/line-out.png` (C2 + toward the board). Note per machine: loads / fails partway / never starts, and the file used.
-- Verified on the board so far: speaker, TAP/TZX playback, live border, card swap, browse lock, End of tape, long-gap shortening (matches an Android player; MaxDuino on a TZXduino plays the full 35 s gap).
+## Real-machine testing (overview)
+- Machines: ZX Spectrum 48K + 128K, MSX (Just for Fun MSX1), BBC Model B (with a PiTube 6502 co-processor) all **load and are in the README tables**; REM verified on the MSX and BBC. Still to do: **Amstrad CPC 464** (once the machine is fixed), **Oric Atmos** (scratch-built; REM relay visible/audible), **ZX81** (cherry-key self-build, see below).
+- Line out: LM386 at gain 20 (circuit or module), volume about mid, PC USB power. Note per machine: loads / fails partway / never starts, and the file used. The README's "Real-machine tests" section is the user-facing record: keep it in step with the notes below.
+- Also verified on the board: speaker, live border, card swap, browse lock, End of tape, long-gap shortening (matches an Android player; MaxDuino on a TZXduino plays the full 35 s gap), USB file transfer, screen rotation.
 
 ## Real Spectrum tests (2026-11-16)
 - **MANIC.TAP loads on the real Spectrum** (through the LM386 stage, `images/line-out-lm386.png`, VR1 mid, PC USB power).
@@ -132,6 +138,11 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - **MSX speeds** (Just for Fun MSX1): 1200 and 2400 baud load; **3600 and 3850 give "Device I/O error"** right after the first header (Found: then error; BASIC stops the motor and REM pauses TouchDuino). 3150 untested. Sorcery (EU).cas (Virgin: ASCII loader + 3 BLOAD files) loads at 2400 with REM off/on blips at each file (296, 16736, 30440). Use 2400 as the MSX default.
 - **BBC Model B (2026-11-17): Chuckie Egg UEF loads** (*TAPE hung the user's machine; after BREAK the tape FS was usable with CHAIN""). Gotchas: (1) UEF plays standard timing **only when Baud = 1200**; any other baud uses MaxDuino's UEF turbo pulses (uef.cpp `if (BAUDRATE == 1200)`) and the BBC just says Searching. (2) Stairway to Hell / most archive UEFs are **gzip-compressed** (1f 8b); the engine needs "UEF File!" so they must be gunzipped (done on the PC so far). Both now done: **UEF always plays at 1200** (`s_force_1200` in engine.cpp, set in do_play from the extension and honoured by apply_settings), and **gzip files are unpacked into PSRAM** by `TapeFile::open_gzip()` (file_utils.cpp, ROM `tinfl_decompress`, up to 4 MB, served from memory; `filesize` is reset from `entry.fileSize()` after UniPlay). The tinfl decompressor state (~11 KB) must be heap-allocated: `tinfl_decompress_mem_to_mem` puts it on the 6 KB tape-task stack and rebooted the board. Verified: compressed Chuckie Egg at Baud 2400 loads. **REM works on the BBC too** (Auto REM, invert off; the user's BBC lead has the motor pins on the REM jack): the MOS stops the motor after each file (paused 12.5 s at byte 4206 while the loader ran) and the loader restarts it; resumed at the exact byte, End of tape.
 - Next: Oric (also good for REM).
+
+## ZX81 and ZON-X ideas (from 2026-11-22, not started)
+- The user has a cherry-key self-built ZX81 with a self-built **ZON-X compatible AY sound interface** (GAL address decoding): https://github.com/Bambelweeny57/ZXEightyZON (showcased with the Multi Scroller demo). 16K of 32K RAM active; an FPGA ULA would give 32K, but the user prefers to stay authentic (with LS logic only an AY-3-8912 worked, and not with that ULA; untried with the GAL decoder).
+- Idea: play AY chiptunes (AY-3-8910 / YM2149 versions, e.g. Afterburner, Space Harrier) on it: a Z80 player saved as a `.P` file that TouchDuino loads (zx8081 path), either with the register data in the same `.P` or a player for `.ay` files like the Spectrum's. Check the ZON-X port addresses in that repo first; .ay files contain Spectrum player code (ports 0xFFFD/0xBFFD, interrupts) that would need adapting, and the 16K RAM limit matters for register dumps.
+- First step when we start: test plain `.P` loading on the ZX81 (MaxDuino's ZX81 format code is in, untested on hardware).
 
 ## Spectrum loading screens (2026-11-15)
 - `cover_from_spectrum_tape()` in cover.cpp: walks TZX (ID10/11/14 data) or TAP blocks, finds a SCREEN$ (a "CODE 16384,6912" header + data block, else a headerless 6914-byte block with flag 0xFF), decodes the 6912 bytes (interleaved bitmap + attributes, BRIGHT 0xFF / normal 0xD7) to 256x192 and box-filter scales it to the TV screen (122x92).
