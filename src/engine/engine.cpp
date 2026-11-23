@@ -284,16 +284,21 @@ static bool motor_line_on(void)
     return s_settings.rem_invert ? !low : low;
 }
 
-// UEF (BBC/Electron/Atom) plays standard timing only at BAUDRATE 1200; any
-// other value switches MaxDuino's UEF code to its turbo pulses, which a stock
-// machine can't read ("Searching" forever). So a UEF always plays at 1200 and
-// the baud option only affects CAS / TSX / CDT.
-static bool s_force_1200 = false;
+// UEF (BBC/Electron/Atom) plays standard timing only at BAUDRATE 1200, and an
+// Oric tape only at <= 2400 (ORICSPEEDUP); above that MaxDuino switches to turbo
+// pulses a stock machine can't read ("Searching" forever). So those formats
+// always play at their standard speed and the baud option only affects
+// CAS / TSX / CDT. 0 = use the baud option.
+static uint16_t s_force_baud = 0;
+
+DRAM_ATTR volatile uint8_t g_tape_invert = 0;
 
 static void apply_settings(const tape_settings_t *s)
 {
     s_settings = *s;
-    BAUDRATE = (start == 1 && s_force_1200) ? 1200 : s->baud;
+    BAUDRATE = (start == 1 && s_force_baud) ? s_force_baud : s->baud;
+    g_tape_invert = s->out_invert ? 1 : 0;
+    if (start != 1) tape_out_write(0);   // idle level follows the setting
     mselectMask = s->motor_auto;
     TSXCONTROLzxpolarityUEFSWITCHPARITY = s->polarity;
     skip2A = s->skip2a;
@@ -313,8 +318,8 @@ static void do_play(const char *path)
     fileName[255] = 0;
     const char *dot = strrchr(fileName, '.');
     if (!dot) { engine_message("No file extension"); return; }
-    s_force_1200 = !strcasecmp(dot + 1, "uef");
-    BAUDRATE = s_force_1200 ? 1200 : s_settings.baud;
+    s_force_baud = !strcasecmp(dot + 1, "uef") ? 1200 : 0;
+    BAUDRATE = s_force_baud ? s_force_baud : s_settings.baud;
 
     FILE *f = fopen(path, "rb");
     if (!f) { engine_message("Cannot open file"); return; }
@@ -326,6 +331,7 @@ static void do_play(const char *path)
     pauseOn = false;
     UniPlay();                       // opens the file, detects format, starts the ISR
     if (entry.isOpen()) filesize = entry.fileSize();   // a gzipped file plays at its unpacked size
+    if (currentID == BLOCKID::ORIC) { s_force_baud = 2400; BAUDRATE = 2400; }   // Oric .tap: standard speed
     // Hold the ISR (it idles without using the buffer) while the block table is
     // scanned: a TZX scan takes 100+ ms, which used to play out both pages of
     // start-up holds and count an underrun. UniLoop() releases it (isStopped = pauseOn).

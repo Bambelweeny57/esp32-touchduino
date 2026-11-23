@@ -91,7 +91,7 @@ static lv_obj_t *lbl_path, *lbl_rem, *list;
 static lv_obj_t *tv_frame, *tv_screen, *img_cover, *badge, *badge_lbl, *badge_stripes[4], *placeholder_lbl;
 static lv_obj_t *lbl_name, *lbl_info;
 static lv_obj_t *bar_prog, *lbl_status, *lbl_play;
-static lv_obj_t *sw_reminv;
+static lv_obj_t *sw_reminv, *sw_outinv;
 static lv_obj_t *bm_baud, *sw_motor, *sw_pol, *sw_skip2a, *sw_gaps, *sw_spk, *sl_vol, *lbl_vol;
 
 // Styles
@@ -157,7 +157,7 @@ static const char *format_name(const char *e)
 // ---------------------------------------------------------------------------
 // Systems: badges, border colours and loading-stripe styles
 
-enum System { SYS_NONE, SYS_SPECTRUM, SYS_AMSTRAD, SYS_BBC, SYS_MSX, SYS_DRAGON, SYS_C64, SYS_ZX81, SYS_TAPE };
+enum System { SYS_NONE, SYS_SPECTRUM, SYS_AMSTRAD, SYS_BBC, SYS_MSX, SYS_DRAGON, SYS_C64, SYS_ZX81, SYS_ORIC, SYS_TAPE };
 
 // How a system's loaders coloured the border while loading
 // FK_ZX81: the whole TV shows black/white bands of the live signal, as a ZX81
@@ -178,6 +178,7 @@ static const struct {
     /* DRAGON */   { "DRAGON",            0x0d2a0d, 0x40ff40, { 0xff7a1a, 0xff7a1a, 0xffb000, 0xffb000 },       0x101010, FK_STATIC },
     /* C64 */      { "COMMODORE\n64",     0x40318d, 0x7869c4, { 0x880000, 0xdd8855, 0xeeee77, 0x0088ff },       0x7869c4, FK_C64 },
     /* ZX81 */     { "ZX81",              0xf0f0f0, 0x101010, { 0x101010, 0x101010, 0x101010, 0x101010 },       0xf0f0f0, FK_ZX81 },
+    /* ORIC */     { "ORIC\nATMOS",       0x000000, 0xf0f0f0, { 0xe01010, 0xe01010, 0xf0f0f0, 0xf0f0f0 },       0x000000, FK_STATIC },
     /* TAPE */     { "",                  0x000000, 0xffffff, { 0, 0, 0, 0 },                                   0x262c38, FK_SPECTRUM },
 };
 
@@ -190,6 +191,7 @@ static System system_from_name(const std::string &name)
     if (n.find("sinclair") != std::string::npos || n.find("spectrum") != std::string::npos) return SYS_SPECTRUM;
     if (n.find("amstrad") != std::string::npos || n.find("cpc") != std::string::npos) return SYS_AMSTRAD;
     if (n.find("bbc") != std::string::npos) return SYS_BBC;
+    if (n.find("oric") != std::string::npos || n.find("atmos") != std::string::npos) return SYS_ORIC;
     if (n.find("msx") != std::string::npos) return SYS_MSX;
     if (n.find("dragon") != std::string::npos) return SYS_DRAGON;
     if (n.find("c64") != std::string::npos || n.find("commodore") != std::string::npos) return SYS_C64;
@@ -1199,6 +1201,7 @@ static void settings_from_widgets(void)
     if (b < 5) s_settings.baud = baud_vals[b];
     s_settings.motor_auto = lv_obj_has_state(sw_motor, LV_STATE_CHECKED);
     s_settings.rem_invert = lv_obj_has_state(sw_reminv, LV_STATE_CHECKED);
+    s_settings.out_invert = lv_obj_has_state(sw_outinv, LV_STATE_CHECKED);
     s_settings.polarity = lv_obj_has_state(sw_pol, LV_STATE_CHECKED);
     s_settings.skip2a = lv_obj_has_state(sw_skip2a, LV_STATE_CHECKED);
     s_settings.short_gaps = lv_obj_has_state(sw_gaps, LV_STATE_CHECKED);
@@ -1218,6 +1221,7 @@ static void settings_to_widgets(void)
     }
     if (s_settings.motor_auto) lv_obj_add_state(sw_motor, LV_STATE_CHECKED); else lv_obj_clear_state(sw_motor, LV_STATE_CHECKED);
     if (s_settings.rem_invert) lv_obj_add_state(sw_reminv, LV_STATE_CHECKED); else lv_obj_clear_state(sw_reminv, LV_STATE_CHECKED);
+    if (s_settings.out_invert) lv_obj_add_state(sw_outinv, LV_STATE_CHECKED); else lv_obj_clear_state(sw_outinv, LV_STATE_CHECKED);
     if (s_settings.polarity) lv_obj_add_state(sw_pol, LV_STATE_CHECKED); else lv_obj_clear_state(sw_pol, LV_STATE_CHECKED);
     if (s_settings.skip2a) lv_obj_add_state(sw_skip2a, LV_STATE_CHECKED); else lv_obj_clear_state(sw_skip2a, LV_STATE_CHECKED);
     if (s_settings.short_gaps) lv_obj_add_state(sw_gaps, LV_STATE_CHECKED); else lv_obj_clear_state(sw_gaps, LV_STATE_CHECKED);
@@ -1335,6 +1339,7 @@ static void build_settings(void)
 
     sw_motor = settings_switch(body, "Motor: Auto REM", "On: REM jack pauses/plays. Off: force run");
     sw_reminv = settings_switch(body, "REM invert", "Off: contact closed = play. On: open = play");
+    sw_outinv = settings_switch(body, "Invert output", "Flip the tape signal. Try it if a machine never loads");
     sw_spk = settings_switch(body, "Onboard speaker", "Hear the tape signal on the speaker");
 
     r = settings_row(body, "Speaker volume", NULL);

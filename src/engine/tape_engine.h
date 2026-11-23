@@ -38,6 +38,7 @@ typedef struct {
     uint16_t baud;         // 1200, 2400, 3150, 3600, 3850 (TSX/CAS/CDT speed-up)
     bool motor_auto;       // true = Auto REM, false = Force run
     bool rem_invert;       // false: REM contact closed (IO18 low) = play; true: open (IO18 high) = play
+    bool out_invert;       // flip the tape output signal (machines/leads that need the other polarity)
     bool polarity;         // MaxDuino TSXCONTROLzxpolarityUEFSWITCHPARITY
     bool skip2a;           // ignore TZX ID2A "stop if 48K"
     bool short_gaps;       // play gaps longer than 5 s as 5 s
