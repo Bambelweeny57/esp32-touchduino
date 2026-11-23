@@ -14,7 +14,7 @@ It runs on the Guition **JC3248W535** board:
 
 *The screen is a real screenshot from the board, playing `MANIC.TAP` with its loading stripes in the preview border.*
 
-> **Status:** working. Browsing, cover art, playback, the speaker and USB file transfer are tested on the board. Games load on a real ZX Spectrum 48K and 128K, an MSX and a BBC Micro through an LM386 line-out stage, and REM motor control works on the MSX and the BBC (see [Real-machine tests](#real-machine-tests)). The Oric, Amstrad CPC and ZX81 are still to be tested.
+> **Status:** working. Browsing, cover art, playback, the speaker and USB file transfer are tested on the board. Games load on a real ZX Spectrum 48K and 128K, a ZX81, an MSX and a BBC Micro through an LM386 line-out stage, and REM motor control works on the MSX and the BBC (see [Real-machine tests](#real-machine-tests)). The Oric and Amstrad CPC are still to be tested.
 
 ## Features
 
@@ -31,6 +31,7 @@ It runs on the Guition **JC3248W535** board:
 - **Live loading border:** while a tape plays, the TV border is drawn from the real tape signal, lined up with what you hear, like the original loaders:
   - **ZX Spectrum:** red/cyan bands during the pilot tone and thin blue/yellow bands during data;
   - **Amstrad CPC and C64:** a different colour for each pulse, like their turbo loaders;
+  - **ZX81:** the whole picture turns into slanted black and white stripes, the way a ZX81 looked on an old TV while it loaded (its picture stops during `LOAD`);
   - **other machines:** a plain border.
 
   The border goes black (or the machine's own border colour) whenever there's no sound. Drawing it never touches the tape timing.
@@ -137,7 +138,15 @@ Loaded through an LM386 stage (the circuit above, or a ready-made module at gain
 | --- | --- | --- |
 | Chuckie Egg | UEF, as downloaded (gzip-compressed) | Loads. REM pauses while the loader runs and between blocks, resuming at the exact byte |
 
-**Not tested yet:** Amstrad CPC (the test machine shows "Memory full" even with a TZXduino, so it needs repairing first), Oric Atmos and ZX81.
+**ZX81** (cherry-key self-build, `LOAD ""`)
+
+| Game | File | Result |
+| --- | --- | --- |
+| 3D Monster Maze | P | Loads (about 2 min 20 s) |
+
+ZX81 files are recognised by a `ZX81` (or `ZX80`) folder name or by the `.p`, `.81`, `.p81` and `.o` extensions, and get a ZX81 badge.
+
+**Not tested yet:** Amstrad CPC (the test machine shows "Memory full" even with a TZXduino, so it needs repairing first) and Oric Atmos.
 
 Machine notes:
 - **MSX:** start at Baud **2400** (or 1200). Faster settings may give "Device I/O error". Some multi-load games say "stop the tape" while leaving the motor on: press ❚❚, not ■, so the tape stays at the next level.
