@@ -157,10 +157,12 @@ static const char *format_name(const char *e)
 // ---------------------------------------------------------------------------
 // Systems: badges, border colours and loading-stripe styles
 
-enum System { SYS_NONE, SYS_SPECTRUM, SYS_AMSTRAD, SYS_BBC, SYS_MSX, SYS_DRAGON, SYS_C64, SYS_TAPE };
+enum System { SYS_NONE, SYS_SPECTRUM, SYS_AMSTRAD, SYS_BBC, SYS_MSX, SYS_DRAGON, SYS_C64, SYS_ZX81, SYS_TAPE };
 
 // How a system's loaders coloured the border while loading
-enum FrameKind { FK_STATIC, FK_SPECTRUM, FK_CPC, FK_C64 };
+// FK_ZX81: the whole TV shows black/white bands of the live signal, as a ZX81
+// looked on an old TV while loading (the ULA stops generating a picture).
+enum FrameKind { FK_STATIC, FK_SPECTRUM, FK_CPC, FK_C64, FK_ZX81 };
 
 static const struct {
     const char *text;
@@ -175,6 +177,7 @@ static const struct {
     /* MSX */      { "MSX",               0x10204a, 0xffffff, { 0x6080ff, 0x6080ff, 0x6080ff, 0x6080ff },       0x5955e0, FK_STATIC },
     /* DRAGON */   { "DRAGON",            0x0d2a0d, 0x40ff40, { 0xff7a1a, 0xff7a1a, 0xffb000, 0xffb000 },       0x101010, FK_STATIC },
     /* C64 */      { "COMMODORE\n64",     0x40318d, 0x7869c4, { 0x880000, 0xdd8855, 0xeeee77, 0x0088ff },       0x7869c4, FK_C64 },
+    /* ZX81 */     { "ZX81",              0xf0f0f0, 0x101010, { 0x101010, 0x101010, 0x101010, 0x101010 },       0xf0f0f0, FK_ZX81 },
     /* TAPE */     { "",                  0x000000, 0xffffff, { 0, 0, 0, 0 },                                   0x262c38, FK_SPECTRUM },
 };
 
@@ -182,6 +185,8 @@ static System system_from_name(const std::string &name)
 {
     std::string n = name;
     for (auto &c : n) c = (char)tolower((unsigned char)c);
+    // before "sinclair": a "Sinclair ZX81" folder is a ZX81, not a Spectrum
+    if (n.find("zx81") != std::string::npos || n.find("zx80") != std::string::npos) return SYS_ZX81;
     if (n.find("sinclair") != std::string::npos || n.find("spectrum") != std::string::npos) return SYS_SPECTRUM;
     if (n.find("amstrad") != std::string::npos || n.find("cpc") != std::string::npos) return SYS_AMSTRAD;
     if (n.find("bbc") != std::string::npos) return SYS_BBC;
@@ -197,6 +202,7 @@ static System system_from_ext(const char *e)
     if (!strcasecmp(e, "cdt")) return SYS_AMSTRAD;
     if (!strcasecmp(e, "uef")) return SYS_BBC;
     if (!strcasecmp(e, "tsx") || !strcasecmp(e, "cas")) return SYS_MSX;
+    if (!strcasecmp(e, "p") || !strcasecmp(e, "81") || !strcasecmp(e, "o") || !strcasecmp(e, "p81")) return SYS_ZX81;
     return SYS_NONE;
 }
 
@@ -241,12 +247,19 @@ static inline uint32_t xorshift(uint32_t &s)
 
 // Draw one horizontal band, but only where it falls on the border (never
 // under the screen, which is drawn on top anyway).
+static bool s_band_full = false;   // ZX81: bands across the whole TV, not just the border
+
 static void draw_band(lv_draw_ctx_t *dc, lv_draw_rect_dsc_t *d, const lv_area_t *a, int y0, int y1, uint32_t col)
 {
     if (y0 < a->y1) y0 = a->y1;
     if (y1 > a->y2) y1 = a->y2;
     if (y0 > y1) return;
     d->bg_color = lv_color_hex(col);
+    if (s_band_full) {
+        lv_area_t f = { a->x1, (lv_coord_t)y0, a->x2, (lv_coord_t)y1 };
+        lv_draw_rect(dc, d, &f);
+        return;
+    }
     const int top_end = a->y1 + TV_BORDER - 1;
     const int bot_start = a->y2 - TV_BORDER + 1;
     lv_area_t r;
@@ -290,6 +303,7 @@ static uint32_t live_colour(FrameKind kind, const LiveEdge &e, uint32_t dur)
     switch (kind) {
         case FK_CPC: return CPC_PAL[(e.idx * 7u) % (sizeof(CPC_PAL) / 4)];   // a colour per pulse
         case FK_C64: return C64_PAL[(e.idx * 11u) % 16];
+        case FK_ZX81: return e.lvl ? 0xf0f0f0 : 0x101010;                   // black/white bands
         default:     // ZX Spectrum ROM loader: red/cyan pilot, blue/yellow data
             if (dur >= PILOT_MIN_US) return e.lvl ? 0x00c8c8 : 0xc80000;
             return e.lvl ? 0xc8c800 : 0x0000c8;
@@ -328,6 +342,44 @@ static void draw_live(lv_draw_ctx_t *dc, lv_draw_rect_dsc_t *d, const lv_area_t 
 
     if (m == 0) {   // nothing recorded: silence
         draw_band(dc, d, a, a->y1, a->y2, s_silent_col);
+        return;
+    }
+
+    if (s_band_full) {
+        // ZX81: raster order, like a real TV. Each row is swept left to right in
+        // time, so an edge lands partway along a row and the stripes come out
+        // slanted and broken, as they did on an old TV while a ZX81 loaded.
+        const int W = a->x2 - a->x1 + 1;
+        int jj = 0;
+        auto colour_at = [&](int k, uint32_t t) -> uint32_t {
+            if ((int32_t)(asc[0].t - t) > 0) return s_silent_col;
+            uint32_t start = asc[k].t, dur;
+            if (k + 1 < m) dur = asc[k + 1].t - start;
+            else if (have_after) dur = after_t - start;
+            else dur = t - start;
+            return dur > SILENCE_US ? s_silent_col : live_colour(kind, asc[k], dur);
+        };
+        for (int r = 0; r < rows; r++) {
+            uint32_t tr0 = t0 + (uint32_t)((uint64_t)LIVE_WINDOW_US * r / rows);
+            uint32_t tr1 = t0 + (uint32_t)((uint64_t)LIVE_WINDOW_US * (r + 1) / rows);
+            uint32_t span = tr1 - tr0 ? tr1 - tr0 : 1;
+            while (jj + 1 < m && (int32_t)(asc[jj + 1].t - tr0) <= 0) jj++;
+            int x = a->x1;
+            lv_coord_t y = (lv_coord_t)(a->y1 + r);
+            while (jj + 1 < m && (int32_t)(asc[jj + 1].t - tr1) < 0) {
+                int xe = a->x1 + (int)((uint64_t)(asc[jj + 1].t - tr0) * W / span);
+                if (xe > x) {
+                    d->bg_color = lv_color_hex(colour_at(jj, tr0));
+                    lv_area_t seg = { (lv_coord_t)x, y, (lv_coord_t)(xe - 1), y };
+                    lv_draw_rect(dc, d, &seg);
+                    x = xe;
+                }
+                jj++;
+            }
+            d->bg_color = lv_color_hex(colour_at(jj, tr1));
+            lv_area_t seg = { (lv_coord_t)x, y, a->x2, y };
+            lv_draw_rect(dc, d, &seg);
+        }
         return;
     }
 
@@ -450,6 +502,13 @@ static void anim_timer_cb(lv_timer_t *t)
 #if UI_ANIM_SELFTEST
     mode = 2; kind = FK_SPECTRUM;
 #endif
+    // ZX81 loading: hide the picture so the bands fill the whole TV
+    bool full = mode == 4 && kind == FK_ZX81;
+    if (full != s_band_full) {
+        s_band_full = full;
+        if (full) lv_obj_add_flag(tv_screen, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_clear_flag(tv_screen, LV_OBJ_FLAG_HIDDEN);
+    }
     bool changed = mode != s_anim_mode || kind != s_anim_kind;
     s_anim_mode = mode;
     s_anim_kind = kind;

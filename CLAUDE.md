@@ -63,7 +63,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - [x] Display turned 180 degrees (LV_DISP_ROT_270) for the printed case; picture and touch verified by the user 2026-11-22
 - [ ] Amstrad CPC 464 (machine needs checking first: "Memory full" even on a TZXduino)
 - [ ] Oric Atmos (also a good REM test: the relay can be seen and heard)
-- [ ] ZX81 (see "ZX81 and ZON-X ideas")
+- [x] ZX81 loads (3D Monster Maze .p, 2026-11-23); ZX81 badge and raster-style loading stripes
 
 ## Gotchas
 - ESP-IDF builds with -Werror=switch etc.; upstream engine files get relaxed warnings in `src/CMakeLists.txt` (only `src/engine/*.cpp`)
@@ -84,7 +84,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 ## UI look
 - "Glass" theme = opaque vertical gradients + 1 px translucent borders (no large alpha areas, no shadows: both are expensive here).
 - Preview is a "TV": bezel > border frame (TV_BORDER 8 px) > screen 144x92. Border colour is the system's (Spectrum light grey, CPC blue, C64 light blue...).
-- Loading border while playing is the **live signal** (`draw_live`): reads the last 20 ms of edges from `g_mon_ring` (recorded by the ISR for the speaker, now always recorded), ~35 ms behind to line up with the speaker, one row per ~185 us. Spectrum: red/cyan for pulses >= 540 us (pilot), blue/yellow for shorter (data); CPC/C64: a palette colour per pulse. Gaps > 3 ms = silence = system border colour (Spectrum black). Other formats (BBC, MSX, Oric, Jupiter...) keep a static border. `tape_status_t.phase` is still reported but no longer used by the UI.
+- Loading border while playing is the **live signal** (`draw_live`): reads the last 20 ms of edges from `g_mon_ring` (recorded by the ISR for the speaker, now always recorded), ~35 ms behind to line up with the speaker, one row per ~185 us. Spectrum: red/cyan for pulses >= 540 us (pilot), blue/yellow for shorter (data); CPC/C64: a palette colour per pulse. **ZX81 (FK_ZX81):** `tv_screen` is hidden and `s_band_full` makes the bands fill the whole TV; drawn in raster order (each row swept left to right in time, ~185 us per row) so edges land mid-row and the black/white stripes come out slanted like a real ZX81 on an old TV; silence = white. Gaps > 3 ms = silence = system border colour (Spectrum black). Other formats (BBC, MSX, Oric, Jupiter...) keep a static border. `tape_status_t.phase` is still reported but no longer used by the UI.
 - Image fallback chain: game.jpg/png -> folder.jpg/png up the tree -> system badge from folder name -> default placeholder (black screen, cycling Spectrum-style loading border).
 
 ## USB file transfer mode (2026-11-16)
@@ -113,7 +113,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - Engine logs each TZX data block's gap at play (`id 0x10 @ off: N bytes, then X ms gap`) and any stop markers. Block/ID transitions are sampled every 50 ms, so short IDPAUSE states are not logged.
 
 ## Real-machine testing (overview)
-- Machines: ZX Spectrum 48K + 128K, MSX (Just for Fun MSX1), BBC Model B (with a PiTube 6502 co-processor) all **load and are in the README tables**; REM verified on the MSX and BBC. Still to do: **Amstrad CPC 464** (once the machine is fixed), **Oric Atmos** (scratch-built; REM relay visible/audible), **ZX81** (cherry-key self-build, see below).
+- Machines: ZX Spectrum 48K + 128K, MSX (Just for Fun MSX1), BBC Model B (with a PiTube 6502 co-processor) and **ZX81** (cherry-key self-build) all **load and are in the README tables**; REM verified on the MSX and BBC. Still to do: **Amstrad CPC 464** (once the machine is fixed), **Oric Atmos** (scratch-built; REM relay visible/audible).
 - Line out: LM386 at gain 20 (circuit or module), volume about mid, PC USB power. Note per machine: loads / fails partway / never starts, and the file used. The README's "Real-machine tests" section is the user-facing record: keep it in step with the notes below.
 - Also verified on the board: speaker, live border, card swap, browse lock, End of tape, long-gap shortening (matches an Android player; MaxDuino on a TZXduino plays the full 35 s gap), USB file transfer, screen rotation.
 
@@ -142,7 +142,8 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 ## ZX81 and ZON-X ideas (from 2026-11-22, not started)
 - The user has a cherry-key self-built ZX81 with a self-built **ZON-X compatible AY sound interface** (GAL address decoding): https://github.com/Bambelweeny57/ZXEightyZON (showcased with the Multi Scroller demo). 16K of 32K RAM active; an FPGA ULA would give 32K, but the user prefers to stay authentic (with LS logic only an AY-3-8912 worked, and not with that ULA; untried with the GAL decoder).
 - Idea: play AY chiptunes (AY-3-8910 / YM2149 versions, e.g. Afterburner, Space Harrier) on it: a Z80 player saved as a `.P` file that TouchDuino loads (zx8081 path), either with the register data in the same `.P` or a player for `.ay` files like the Spectrum's. Check the ZON-X port addresses in that repo first; .ay files contain Spectrum player code (ports 0xFFFD/0xBFFD, interrupts) that would need adapting, and the 16K RAM limit matters for register dumps.
-- First step when we start: test plain `.P` loading on the ZX81 (MaxDuino's ZX81 format code is in, untested on hardware).
+- Plain `.P` loading works on this ZX81 (2026-11-23: 3dmon.p, 10552 bytes, ~2 min 20 s, underruns 0, End of tape). ZX81 system in ui.cpp: `SYS_ZX81` from a `zx81`/`zx80` folder name (checked before "sinclair") or the `.p/.81/.p81/.o` extensions; badge black on white, white border.
+- Plan for the AY player: a **separate repo** for the Z80 work, with **sjasmplus** (can output .P and .tap) + the **DeZog** VS Code debugger + **ZEsarUX** (ZX81/Spectrum emulator; check its ZX81 AY/ZON-X sound option). Build and debug in the emulator, then copy the .P to TouchDuino's card for the real ZX81.
 
 ## Spectrum loading screens (2026-11-15)
 - `cover_from_spectrum_tape()` in cover.cpp: walks TZX (ID10/11/14 data) or TAP blocks, finds a SCREEN$ (a "CODE 16384,6912" header + data block, else a headerless 6914-byte block with flag 0xFF), decodes the 6912 bytes (interleaved bitmap + attributes, BRIGHT 0xFF / normal 0xD7) to 256x192 and box-filter scales it to the TV screen (122x92).
