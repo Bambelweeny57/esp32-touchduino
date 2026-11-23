@@ -14,7 +14,7 @@ It runs on the Guition **JC3248W535** board:
 
 *The screen is a real screenshot from the board, playing `MANIC.TAP` with its loading stripes in the preview border.*
 
-> **Status:** working. Browsing, cover art, playback, the speaker and USB file transfer are tested on the board. Games load on a real ZX Spectrum 48K and 128K, a ZX81, an MSX and a BBC Micro through an LM386 line-out stage, and REM motor control works on the MSX and the BBC (see [Real-machine tests](#real-machine-tests)). The Oric and Amstrad CPC are still to be tested.
+> **Status:** working. Browsing, cover art, playback, the speaker and USB file transfer are tested on the board. Games load on a real ZX Spectrum 48K and 128K, a ZX81, an MSX, a BBC Micro and an Oric Atmos through an LM386 line-out stage, and REM motor control works on the MSX, the BBC and the Oric (see [Real-machine tests](#real-machine-tests)). The Amstrad CPC is still to be tested.
 
 ## Features
 
@@ -39,10 +39,11 @@ It runs on the Guition **JC3248W535** board:
 - **Line out:** GPIO 17 outputs the signal for a 3.5 mm jack to the computer's EAR/tape input.
 - **Motor control (REM):** in **Auto REM**, the computer's motor line on GPIO 18 pauses and resumes playback, and the header shows **REM ▶** or **REM ❚❚**. In **Force run** the line is ignored and the header shows **RUN**.
 - **Options:**
-  - speed for TSX/CAS/CDT (1200–3850 baud). UEF files always play at the standard 1200 baud;
+  - speed for TSX/CAS/CDT (1200–3850 baud). UEF and Oric tapes always play at their standard speed;
   - **Shorten long gaps** (on by default): gaps over 5 s in the file play as 5 s. TZX transfers often contain long stretches of blank tape, such as 35 s after a loading screen. Turn it off if a game ever fails to load;
   - **Skip TZX block 2A** (on by default): ignores "stop the tape if in 48K mode" markers, which would wrongly pause 128K games;
   - **REM invert** (off by default): off, a closed REM contact means play; turn it on for a machine whose motor line works the other way round;
+  - **Invert output** (off by default): flips the tape signal, for a machine or lead that needs the other polarity;
   - **USB file transfer:** the SD card appears on the PC as a USB drive, so files can be added without taking the card out;
   - MaxDuino's polarity/parity flag.
 
@@ -103,7 +104,7 @@ Instead of building the amplifier, you can use one of the cheap **LM386 amplifie
 - **Different machines need different leads:**
   - **ZX Spectrum:** the EAR socket.
   - **Amstrad CPC 664/6128:** the DIN tape socket. The CPC 464's built-in deck needs a cassette adaptor or a modification.
-  - **BBC Micro:** the 7-pin DIN cassette socket (its motor relay pins give REM).
+  - **BBC Micro and Oric-1 / Atmos:** the 7-pin DIN cassette socket (its motor relay pins give REM). One lead works for both: ours is sold as a "BBC and Oric" tape lead.
   - **MSX:** the 8-pin DIN cassette socket (EAR in, plus the REMOTE relay pins for REM).
   - **Commodore 64:** has no audio input, so it needs a datasette-port interface instead of this circuit.
 - **Motor sense (optional):** the computer's REM output is a switch (a relay contact) that closes while the motor should run. Wire it between GPIO 18 and GND. The pin has a pull-up, so closed means play. Select **Auto REM** in Options. If a machine works the other way round (playback pauses when the motor should run), turn on **REM invert**: then an open contact means play.
@@ -146,11 +147,20 @@ Loaded through an LM386 stage (the circuit above, or a ready-made module at gain
 
 ZX81 files are recognised by a `ZX81` (or `ZX80`) folder name or by the `.p`, `.81`, `.p81` and `.o` extensions, and get a ZX81 badge.
 
-**Not tested yet:** Amstrad CPC (the test machine shows "Memory full" even with a TZXduino, so it needs repairing first) and Oric Atmos.
+**Oric Atmos** (self-build, `CLOAD""`)
+
+| Game | File | Result |
+| --- | --- | --- |
+| Manic Miner | TAP (Oric) | Loads, with Auto REM starting the tape when `CLOAD""` switches the motor on (the game then asks for its original unlock code) |
+
+Oric files go in a folder named `Oric` (or `Atmos`) for the Oric badge. Oric `.tap` files are told apart from Spectrum ones by their header.
+
+**Not tested yet:** Amstrad CPC (the test machine shows "Memory full" even with a TZXduino, so it needs repairing first).
 
 Machine notes:
 - **MSX:** start at Baud **2400** (or 1200). Faster settings may give "Device I/O error". Some multi-load games say "stop the tape" while leaving the motor on: press ❚❚, not ■, so the tape stays at the next level.
 - **BBC Micro:** UEF files always play at 1200 baud, whatever the Baud setting. Downloaded UEFs can be copied straight to the card.
+- **Oric:** an Oric file has a single short header at the very start, so the tape must start after `CLOAD""`, not before. With **Auto REM** on, press ▶ first: TouchDuino waits at REM ❚❚ until `CLOAD""` switches the motor on. Without REM, type `CLOAD""` and then press ▶. `Loading ..  C` on the top line means it found the header (C = code, B = BASIC; the name can be blank). Oric tapes always play at standard speed, whatever the Baud setting.
 
 **Self-check:** while a tape plays, TouchDuino decodes its own output the way the Spectrum ROM does. For each standard-speed block, the serial log shows a line like
 `selfcheck block 5: 32770 bytes, flag 0xFF, parity OK, ... 0-half 244..244 us, 1-half 489..489 us`.
@@ -187,7 +197,8 @@ python ~/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port CO
 6. **Options.** The ⚙ screen (scroll it for more) holds:
    - **Baud:** the speed for MSX CAS, TSX and CDT files. 2400 is the fastest our MSX loads; 3600 and 3850 gave "Device I/O error". UEF files ignore it and always play at 1200, the speed a BBC or Electron expects.
    - **Motor: Auto REM:** on, the computer's REM line pauses and plays the tape; off, the tape plays straight through (Force run).
-   - **REM invert:** off, a closed REM contact means play (correct for the MSX tested); turn it on if playback pauses when the motor should run.
+   - **REM invert:** off, a closed REM contact means play (correct for the MSX, BBC and Oric tested); turn it on if playback pauses when the motor should run.
+   - **Invert output:** flips the tape signal on GPIO 17 (the speaker, border and self-check are unaffected). None of the tested machines needed it; try it if a machine never finds the tape.
    - **Onboard speaker**, **Speaker volume** and a **Test** beep.
    - **Shorten long gaps**, **Skip TZX block 2A** and the MaxDuino **Polarity / TSX accel / UEF parity** flag.
    - **USB file transfer** (see below).
