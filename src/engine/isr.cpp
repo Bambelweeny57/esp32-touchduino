@@ -13,6 +13,10 @@ volatile byte isStopped=false;
 volatile byte pinState=LOW;
 volatile bool isPauseBlock = false;
 volatile bool wasPauseBlock = false;
+// TouchDuino: upstream tested currentID here, but the engine runs up to two
+// buffer pages ahead: at the end of the file it became IDEOF while C64 pulses
+// were still queued, and the signal lost its flip for the rest of the tape.
+volatile bool g_c64_out = false;
 
 void reset_output_state() {
   // not really part of the ISR, just part of the output
@@ -144,7 +148,7 @@ void IRAM_ATTR wave2() {
 #endif
 */
 #ifdef Use_c64
-  if (currentID == BLOCKID::C64TAP) { // flip signal
+  if (g_c64_out) { // flip signal
     if (pinState == LOW)
       WRITE_HIGH;
     else
@@ -166,7 +170,7 @@ _after_invert:
     {
       newTime = 1500;                     //Set 1.5ms initial pause block 
       #ifdef Use_c64
-         if (currentID == BLOCKID::C64TAP) {
+         if (g_c64_out) {
             pinState= !pinState;
             goto _after_pause_flip;
          }
