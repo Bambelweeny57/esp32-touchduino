@@ -60,7 +60,7 @@ It runs on the Guition **JC3248W535** board:
 | **Tape out** | **17** |
 | **Motor sense (REM)** | **18** (LOW = motor on / play) |
 
-GPIO 17 and 18 are on the 4-pin expansion connectors (GND, 3.3V, IO17, IO18).
+GPIO 17 and 18 are on both 4-pin IO connectors, 1.25 mm and 1.0 mm (GND, 3.3V, IO17, IO18). They carry the same signals, so one can serve the audio output and REM and the other a C64 adapter, with one computer plugged in at a time.
 
 <img src="images/connectors.png" alt="ESP32-Touchduino JC3248W535 Pinout " width="400">
 
