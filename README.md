@@ -14,7 +14,7 @@ It runs on the Guition **JC3248W535** board:
 
 *The screen is a real screenshot from the board, playing `MANIC.TAP` with its loading stripes in the preview border.*
 
-> **Status:** working. Browsing, cover art, playback, the speaker and USB file transfer are tested on the board. Games load on a real ZX Spectrum 48K and 128K, a ZX81, an MSX, a BBC Micro and an Oric Atmos through an LM386 line-out stage, and REM motor control works on the MSX, the BBC and the Oric (see [Real-machine tests](#real-machine-tests)). The Amstrad CPC is still to be tested.
+> **Status:** working. Browsing, cover art, playback, the speaker and USB file transfer are tested on the board. Games load on a real ZX Spectrum 48K and 128K, a ZX81, an MSX, a BBC Micro, an Oric Atmos and an Amstrad CPC 464 through an LM386 line-out stage, and REM motor control works on the MSX, the BBC, the Oric and the CPC (see [Real-machine tests](#real-machine-tests)). The Commodore 64 is still to be tested.
 
 ## Features
 
@@ -155,11 +155,19 @@ ZX81 files are recognised by a `ZX81` (or `ZX80`) folder name or by the `.p`, `.
 
 Oric files go in a folder named `Oric` (or `Atmos`) for the Oric badge. Oric `.tap` files are told apart from Spectrum ones by their header.
 
-**Not tested yet:** Amstrad CPC (the test machine shows "Memory full" even with a TZXduino, so it needs repairing first).
+**Amstrad CPC 464** (self-build with an external tape input, `RUN""`)
+
+| Game | File | Result |
+| --- | --- | --- |
+| Amstrad Diagnostics | CDT, 7 blocks | Loads and runs |
+| Auf Wiedersehen Monty | CDT, custom loader, one 64 KB block at a faster speed | Loads. REM pauses and resumes between blocks |
+
+**Not tested yet:** Commodore 64 (it needs a datasette-port adapter).
 
 Machine notes:
 - **MSX:** start at Baud **2400** (or 1200). Faster settings may give "Device I/O error". Some multi-load games say "stop the tape" while leaving the motor on: press ❚❚, not ■, so the tape stays at the next level.
 - **BBC Micro:** UEF files always play at 1200 baud, whatever the Baud setting. Downloaded UEFs can be copied straight to the card.
+- **Amstrad CPC:** use `RUN""` (CTRL + small ENTER), not `LOAD""`. `LOAD""` stops with "Memory full" after the first header on machine-code tapes that load low in memory, even on a healthy machine.
 - **Oric:** an Oric file has a single short header at the very start, so the tape must start after `CLOAD""`, not before. With **Auto REM** on, press ▶ first: TouchDuino waits at REM ❚❚ until `CLOAD""` switches the motor on. Without REM, type `CLOAD""` and then press ▶. `Loading ..  C` on the top line means it found the header (C = code, B = BASIC; the name can be blank). Oric tapes always play at standard speed, whatever the Baud setting.
 
 **Self-check:** while a tape plays, TouchDuino decodes its own output the way the Spectrum ROM does. For each standard-speed block, the serial log shows a line like
@@ -197,7 +205,7 @@ python ~/.platformio/packages/tool-esptoolpy/esptool.py --chip esp32s3 --port CO
 6. **Options.** The ⚙ screen (scroll it for more) holds:
    - **Baud:** the speed for MSX CAS, TSX and CDT files. 2400 is the fastest our MSX loads; 3600 and 3850 gave "Device I/O error". UEF files ignore it and always play at 1200, the speed a BBC or Electron expects.
    - **Motor: Auto REM:** on, the computer's REM line pauses and plays the tape; off, the tape plays straight through (Force run).
-   - **REM invert:** off, a closed REM contact means play (correct for the MSX, BBC and Oric tested); turn it on if playback pauses when the motor should run.
+   - **REM invert:** off, a closed REM contact means play (correct for the MSX, BBC, Oric and CPC tested); turn it on if playback pauses when the motor should run.
    - **Invert output:** flips the tape signal on GPIO 17 (the speaker, border and self-check are unaffected). None of the tested machines needed it; try it if a machine never finds the tape.
    - **Onboard speaker**, **Speaker volume** and a **Test** beep.
    - **Shorten long gaps**, **Skip TZX block 2A** and the MaxDuino **Polarity / TSX accel / UEF parity** flag.
