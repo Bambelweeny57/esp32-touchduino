@@ -36,6 +36,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - `isr.cpp`: `wave2` marked `IRAM_ATTR`; underrun counter at the page swaps (`g_tape_diag`)
 - `MaxProcessing.cpp/.h`: `tapePath[]` global; `UniPlay` opens `entry.open(tapePath)`
 - `casProcessing.cpp`: fixed upstream bug `for (byte i=9; i>=0; --i)` (infinite loop) -> `int`
+- `c64tap.cpp`: exact cycles-to-us (upstream integer rounding played PAL C64 tapes 1.5% fast); second half-pulse takes the odd microsecond
 
 ## Decisions
 - Sound: the user wants audio **out of the onboard speaker** (small speaker on the board's speaker connector). That's the I2S monitor, on by default, volume in Options. GPIO17 outputs the tape signal for the 3.5 mm jack through an **LM386 stage at gain 20** (`images/line-out-lm386.png`, or a ready-made LM386 module with the pin 1-8 part removed, fed straight from GPIO17). The plain RC filter (`images/line-out.png`) is too quiet for a real Spectrum. Never drive a speaker directly from GPIO17.
