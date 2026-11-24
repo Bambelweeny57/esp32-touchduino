@@ -61,7 +61,8 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - [x] REM motor control verified on the MSX and the BBC (2.5 mm cable: tip -> IO18, sleeve -> GND); REM invert option added
 - [x] USB file transfer mode (2026-11-16)
 - [x] Display turned 180 degrees (LV_DISP_ROT_270) for the printed case; picture and touch verified by the user 2026-11-22
-- [ ] Amstrad CPC 464 (machine needs checking first: "Memory full" even on a TZXduino)
+- [x] Amstrad CPC 464 loads (AmstradDiag.cdt with RUN"", and Auf Wiedersehen Monty, 2026-11-24) with REM
+- [ ] Commodore 64 (adapter drawn, not built)
 - [x] Oric Atmos loads (Manic Miner .tap, 2026-11-23) with REM
 - [x] ZX81 loads (3D Monster Maze .p, 2026-11-23); ZX81 badge and raster-style loading stripes
 
@@ -113,7 +114,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - Engine logs each TZX data block's gap at play (`id 0x10 @ off: N bytes, then X ms gap`) and any stop markers. Block/ID transitions are sampled every 50 ms, so short IDPAUSE states are not logged.
 
 ## Real-machine testing (overview)
-- Machines: ZX Spectrum 48K + 128K, MSX (Just for Fun MSX1), BBC Model B (with a PiTube 6502 co-processor), **ZX81** (cherry-key self-build) and **Oric Atmos** (self-build) all **load and are in the README tables**; REM verified on the MSX, BBC and Oric. Still to do: **Amstrad CPC 464** (once the machine is fixed); C64 datasette interface planned (see below).
+- Machines: ZX Spectrum 48K + 128K, MSX (Just for Fun MSX1), BBC Model B (with a PiTube 6502 co-processor), **ZX81** (cherry-key self-build) and **Oric Atmos** (self-build) all **load and are in the README tables**; REM verified on the MSX, BBC and Oric. The **Amstrad CPC 464** loads too, with REM. Still to do: C64 (see below).
 - Line out: LM386 at gain 20 (circuit or module), volume about mid, PC USB power. Note per machine: loads / fails partway / never starts, and the file used. The README's "Real-machine tests" section is the user-facing record: keep it in step with the notes below.
 - Also verified on the board: speaker, live border, card swap, browse lock, End of tape, long-gap shortening (matches an Android player; MaxDuino on a TZXduino plays the full 35 s gap), USB file transfer, screen rotation.
 
@@ -129,7 +130,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 - README now documents the LM386 circuit and the self-check; `images/line-out.png` (no amp) is kept as the REM/plain-filter reference.
 - 2026-11-17: the user's ready-made LM386 module boards work with R1 removed (gain 20 instead of 200): 48K (Manic, Decathlon) and 128K (D.N.A. Warrior, Monty, Marauder TZX) all load, self-check all OK.
 - Start-of-play "underruns 1" (harmless: silence before the pilot): the ISR played the start-up holds during the block-table scan (100+ ms) and then swapped to a half-filled page. Fixed in do_play(): the ISR is held (isStopped) during the scan, and the first write page is filled before it is released (UniLoop() clears isStopped, so it is set again after each call; drain_tape() is skipped while isStopped). Verified on D.N.A. Warrior: underruns 0 for the whole load.
-- CPC 464 test blocked by the machine: "Memory full" at block 1 even on the TZXduino; the spare CPC board has the wrong keyboard connector. Retry when the machine is fixed (CDT uses the TZX path).
+- **CPC 464 (2026-11-24): AmstradDiag.cdt loads from TouchDuino** (usual volume). The earlier "Memory full" at block 1 (TouchDuino and both TZXduinos) was the user typing LOAD"": BASIC refuses a binary that loads below HIMEM (&0400 here, &0100 for the Montys). The machine was never faulty (12 RAM soak passes). Use RUN"". A corrupt CPC header gives "Read error" (CRC), not "Memory full"; |TAPE is only for machines with a disc ROM. **Auf Wiedersehen Monty (E).cdt** also loads: 512-byte loader, then a 64638-byte turbo block read by its own loader; Auto REM on, REM invert off (paused at 81 until the CPC motor came on, off/on at 941).
 - **MSX (2026-11-17)**, Just for Fun MSX1, LM386 module, 1200 baud, Force run: **Chase H.Q. (EU).cas loads** (ASCII loader -> BLOAD CM custom loader with flashing border, multi-load: the game loaded at ~60% of the file, later levels follow). Choplift (EU).cas played to End of tape but the MSX rebooted when the game started: its loader does POKE &HFFFF,&HAA (slot-select for a specific machine's memory layout; a cartridge conversion), not a tape fault. The MSX motor relay is audible. User's CAS collection: D:/MSX/Games/CAS (A-Z folders) copied via USB mode to /sdcard/MSX/Games.
 - A scratch script (casinfo) lists CAS blocks and the load command from the first header: 10x D3 = CLOAD, 10x EA = RUN"CAS:", 10x D0 = BLOAD"CAS:",R.
 - **REM invert** option (Options, NVS key `reminv`, `tape_settings_t.rem_invert`, default off = contact closed/IO18 low = play), applied in engine.cpp `motor_line_on()` (also drives the header REM indicator).
@@ -143,7 +144,7 @@ for the Guition JC3248W535 board. The hardware/architecture spec is in [Touchdui
 
 ## C64 datasette interface (planned)
 - Datasette port is digital: READ (to C64), SENSE (tie to GND = PLAY pressed), MOTOR (~6-9 V from C64), GND. c64tap.cpp is compiled in; the UI has a C64 badge and live border.
-- Planned in-case interface on a 3.5 mm TRS jack (tip READ, ring MOTOR, sleeve GND): IO17 -> 74HCT125 (5 V from VIN) -> READ; MOTOR -> 1.5k + PC817 LED (1N4148 reverse across it), PC817 transistor IO18 -> GND (keeps the 2.5 mm REM socket working in parallel; motor on = IO18 low = play, invert off). Label the jacks: the LM386 audio jack must never feed the C64. Draw the schematic when the user's 12-pin connectors and optos arrive.
+- Design (2026-11-23, not built): TouchDuino's case only gets a 3.5 mm stereo socket (**tip IO17, ring IO18, sleeve GND**); the adapter is at the C64 end, powered by the C64's +5 V (B-2). Schematic `images/c64-interface.png` (`tools/draw_c64.py`), stripboard 9 strips x 24 holes `images/c64-stripboard.png` (`tools/draw_c64_stripboard.py`, checks its own connectivity). IO17 -> 1k -> 74HCT125 -> READ (D-4); MOTOR (C-3) -> 1.5k -> PC817 LED (1N4148 across), transistor IO18 -> GND; SENSE (F-6) to GND (A-1); power LED + 1k. Auto REM on, REM invert off. Never plug the C64 lead into the LM386 audio jack. **Edge plug must be keyed:** upside down reverses A-1..F-6 (MOTOR lands on READ). With SENSE tied low the KERNAL probably runs the motor at the BASIC prompt, so Auto REM may not hold the tape before LOAD: type LOAD first, then play (to check).
 
 ## ZX81 and ZON-X ideas (from 2026-11-22, not started)
 - The user has a cherry-key self-built ZX81 with a self-built **ZON-X compatible AY sound interface** (GAL address decoding): https://github.com/Bambelweeny57/ZXEightyZON (showcased with the Multi Scroller demo). 16K of 32K RAM active; an FPGA ULA would give 32K, but the user prefers to stay authentic (with LS logic only an AY-3-8912 worked, and not with that ULA; untried with the GAL decoder).
