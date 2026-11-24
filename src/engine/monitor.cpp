@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <stdlib.h>
 
 static const char *TAG = "monitor";
@@ -27,6 +28,7 @@ static const char *TAG = "monitor";
 mon_edge_t g_mon_ring[MON_RING_SIZE];
 volatile uint32_t g_mon_head = 0;
 volatile uint32_t g_mon_tail = 0;
+volatile uint32_t g_mon_drops = 0;
 volatile uint8_t g_mon_last_level = 0;
 volatile bool g_mon_enabled = true;
 
@@ -122,6 +124,110 @@ static void sc_edge(uint32_t t)
     }
 }
 
+// ---- Self-check for C64 tapes -------------------------------------------------
+static uint16_t *volatile s_c64_next = NULL;
+static volatile uint32_t s_c64_next_n = 0;
+static volatile bool s_c64_stop = false;
+struct C64Check {
+    uint16_t *exp;
+    uint32_t n, idx, good, bad, paused, slips, first_bad, first_got, drops0;
+    uint32_t last_fall;
+    bool have, reported;
+    int worst;
+    int badrun;
+    uint32_t hist[16];
+    uint32_t nh;
+    int64_t stop_at;
+};
+static C64Check c6;
+
+void c64check_start(uint16_t *pulses, uint32_t count)
+{
+    s_c64_stop = false;
+    s_c64_next_n = count;
+    __sync_synchronize();
+    s_c64_next = pulses;
+}
+
+void c64check_stop(void) { s_c64_stop = true; }
+
+static void c6_report(const char *why)
+{
+    if (!c6.exp || c6.reported) return;
+    c6.reported = true;
+    uint32_t drops = g_mon_drops - c6.drops0;
+    ESP_LOGI(TAG, "c64check %s: %lu of %lu pulses, %lu ok (worst %d us), %lu BAD, %lu paused, %lu slips, %lu edges not recorded -> %s",
+             why, (unsigned long)c6.idx, (unsigned long)c6.n, (unsigned long)c6.good, c6.worst,
+             (unsigned long)c6.bad, (unsigned long)c6.paused, (unsigned long)c6.slips, (unsigned long)drops,
+             c6.idx < 2 ? "NOTHING CHECKED" : (c6.bad || c6.slips) ? "BAD" : "OK");
+    if (c6.bad) ESP_LOGW(TAG, "c64check first bad: pulse %lu sent %lu us, file %u us", (unsigned long)c6.first_bad,
+                         (unsigned long)c6.first_got, (unsigned)c6.exp[c6.first_bad]);
+}
+
+static void c6_fall(uint32_t t)
+{
+    if (c6.reported) return;
+    uint32_t d = t - c6.last_fall;
+    c6.last_fall = t;
+    if (!c6.have) { c6.have = true; return; }   // start of pulse 1 (pulse 0 starts from an already low line)
+    int diff = (int)d - (int)c6.exp[c6.idx];
+    c6.hist[c6.nh++ & 15] = d;
+    if (diff >= 40000) {                        // paused (by hand or REM) in this pulse
+        c6.paused++;
+        c6.nh = 0;
+        c6.badrun = 0;
+    } else if (diff > 20 || diff < -20) {
+        if (!c6.bad) { c6.first_bad = c6.idx; c6.first_got = d; }
+        c6.bad++;
+        if (++c6.badrun >= 16 && c6.nh >= 16) { // lost step? look 8 pulses either side
+            for (int s = -8; s <= 8; s++) {
+                int64_t base = (int64_t)c6.idx - 15 + s;
+                if (!s || base < 0 || base + 16 > (int64_t)c6.n) continue;
+                int k = 0;
+                while (k < 16) {
+                    int e = (int)c6.hist[(c6.nh - 16 + k) & 15] - (int)c6.exp[base + k];
+                    if (e > 20 || e < -20) break;
+                    k++;
+                }
+                if (k == 16) { c6.idx += s; c6.slips++; break; }
+            }
+            c6.badrun = 0;
+        }
+    } else {
+        c6.good++;
+        c6.badrun = 0;
+        if (diff < 0) diff = -diff;
+        if (diff > c6.worst) c6.worst = diff;
+    }
+    if (++c6.idx >= c6.n) c6_report("complete");
+}
+
+static void c6_poll(void)
+{
+    uint16_t *nx = s_c64_next;
+    if (nx) {
+        uint32_t n = s_c64_next_n;
+        s_c64_next = NULL;
+        free(c6.exp);
+        c6 = C64Check();
+        c6.exp = nx;
+        c6.n = n;
+        c6.idx = 1;
+        c6.drops0 = g_mon_drops;
+        ESP_LOGI(TAG, "c64check: %lu pulses to check", (unsigned long)n);
+    }
+    if (c6.exp && s_c64_stop) {
+        int64_t now = esp_timer_get_time();
+        if (!c6.stop_at) {
+            c6.stop_at = now + 200000;          // let the last edges through (~40 ms behind)
+        } else if (now > c6.stop_at) {
+            c6_report("stopped");
+            free(c6.exp);
+            c6.exp = NULL;
+        }
+    }
+}
+
 static void monitor_task(void *arg)
 {
     sc_reset_block();
@@ -132,6 +238,7 @@ static void monitor_task(void *arg)
     float x_prev = 0, y_prev = 0;
 
     for (;;) {
+        c6_poll();
         bool on = g_mon_enabled;
         int64_t target_ns = ((int64_t)tape_timer_now_us() - MON_LATENCY_US) * 1000;
         if (llabs(cursor_ns - target_ns) > (int64_t)MON_RESYNC_US * 1000) {
@@ -149,11 +256,12 @@ static void monitor_task(void *arg)
                 const mon_edge_t *e = &g_mon_ring[tail & (MON_RING_SIZE - 1)];
                 if ((int32_t)(e->t - t) > 0) break;
                 level = e->level;
-                sc_edge(e->t);
+                if (!c6.exp) sc_edge(e->t);
+                else if (!e->level) c6_fall(e->t);
                 tail++;
             }
             g_mon_tail = tail;
-            if (sc.state == 2 && (int32_t)(t - sc.last_t) > 200000) sc_finish("end");
+            if (!c6.exp && sc.state == 2 && (int32_t)(t - sc.last_t) > 200000) sc_finish("end");
             if (beep) {
                 level = (s_beep_frames / 22) & 1;   // ~1 kHz square
                 if (s_beep_frames > 0) s_beep_frames = s_beep_frames - 1;

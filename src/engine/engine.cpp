@@ -11,6 +11,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 
 #include "configs.h"
 #include "Arduino.h"
@@ -96,6 +97,7 @@ void stopFile()
     UniStop();
     start = 0;
     pauseOn = false;
+    c64check_stop();
     if (was_playing && !s_user_stop) {
         if (id == BLOCKID::IDEOF || pos + 16 >= size) {
             engine_message("End of tape");
@@ -307,9 +309,47 @@ static void apply_settings(const tape_settings_t *s)
     monitor_set_volume(s->volume);
 }
 
+// C64 TAP: read the whole file's pulse lengths (its own parser, independent of
+// c64tap.cpp) so the monitor task can compare them with what is sent.
+static void start_c64_check(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    uint8_t h[20];
+    uint16_t *out = NULL;
+    uint32_t n = 0;
+    uint8_t *raw = NULL;
+    if (fread(h, 1, 20, f) == 20 && !memcmp(h, "C64-TAPE-RAW", 12) && h[12] <= 1 && h[13] == 0 && filesize > 20) {
+        uint32_t len = filesize - 20, decl = le32(h + 16);
+        if (decl < len) len = decl;
+        raw = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+        out = (uint16_t *)heap_caps_malloc((size_t)len * 2, MALLOC_CAP_SPIRAM);
+        if (raw && out && fread(raw, 1, len, f) == len) {
+            uint64_t cps = h[14] == 1 ? 1022727 : 985248;
+            for (uint32_t i = 0; i < len; ) {
+                uint32_t c = raw[i] * 8u;
+                if (raw[i]) i++;
+                else if (h[12] == 0) { c = 2048; i++; }
+                else if (i + 4 <= len) { c = le24(raw + i + 1); i += 4; }
+                else break;
+                uint64_t us = (c * 1000000ULL + cps / 2) / cps;
+                out[n++] = us > 65535 ? 65535 : (uint16_t)us;
+            }
+        }
+    }
+    fclose(f);
+    free(raw);
+    if (n > 2) c64check_start(out, n);
+    else free(out);
+}
+
 static void do_play(const char *path)
 {
-    if (start == 1) { s_user_stop = true; stopFile(); s_user_stop = false; }
+    if (start == 1) {
+        s_user_stop = true; stopFile(); s_user_stop = false;
+        WRITE_LOW;
+        vTaskDelay(pdMS_TO_TICKS(120));   // idle ticks record the low level before the next tape starts
+    }
     strncpy(tapePath, path, 299);
     tapePath[299] = 0;
     const char *base = strrchr(path, '/');
@@ -327,10 +367,12 @@ static void do_play(const char *path)
     filesize = (unsigned long)ftell(f);
     fclose(f);
 
+    start_c64_check(path);
     engine_message("Playing");
     pauseOn = false;
     UniPlay();                       // opens the file, detects format, starts the ISR
     if (entry.isOpen()) filesize = entry.fileSize();   // a gzipped file plays at its unpacked size
+    g_c64_out = currentID == BLOCKID::C64TAP;
     if (currentID == BLOCKID::ORIC) { s_force_baud = 2400; BAUDRATE = 2400; }   // Oric .tap: standard speed
     // Hold the ISR (it idles without using the buffer) while the block table is
     // scanned: a TZX scan takes 100+ ms, which used to play out both pages of
